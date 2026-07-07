@@ -29,6 +29,12 @@ export const DEMO_ACTIVE_MARKER = {
   activeHaloPulseScale: 0.62,
   activeGlowBaseScale: 1.22,
   activeGlowPulseScale: 0.32,
+  orbitRingCount: 3,
+  orbitRingDurationMs: 1300,
+  orbitRingStaggerMs: 170,
+  orbitRingBaseScale: 0.72,
+  orbitRingExpandScale: 5.7,
+  orbitRingOpacity: 0.58,
   pulseSpeed: 5.2
 } as const;
 
