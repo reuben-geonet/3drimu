@@ -25,8 +25,16 @@ interface MarkerVisual {
 }
 
 interface LinkVisual {
-  line: THREE.Line<THREE.BufferGeometry, THREE.LineDashedMaterial>;
+  group: THREE.Group;
+  curve: THREE.QuadraticBezierCurve3;
+  packets: LinkPacketVisual[];
   speed: number;
+}
+
+interface LinkPacketVisual {
+  mesh: THREE.Mesh<THREE.IcosahedronGeometry, THREE.MeshBasicMaterial>;
+  progress: number;
+  delay: number;
 }
 
 interface MapSceneOptions {
@@ -52,14 +60,19 @@ const WORLD_CENTER_Z = NZ_TARGET.lat * MAP_SCALE;
 const OCEAN_OVERSCAN = 360;
 // Status markers are composed from several meshes; scale the group so the glyph stays proportional.
 const STATUS_MARKER_SCALE = 0.25;
+const LINK_PACKET_RADIUS = 0.07;
+const LINK_PACKET_COUNT = 9;
 const MARKER_CLICK_DRAG_TOLERANCE_PX = 6;
 
-const LINK_COLORS: Record<string, string> = {
-  "5G": "#99ffcc",
-  "2G": "#81d4fa",
-  "900M": "#ff7df0",
-  "400M": "#c178ff"
-};
+const LINK_RAINBOW_COLORS = [
+  "#ff5f7e",
+  "#ffd166",
+  "#7cf29c",
+  "#31d7ff",
+  "#8a7dff",
+  "#ff7df0",
+  "#ff5f7e"
+] as const;
 
 export class MapScene {
   private readonly container: HTMLElement;
@@ -108,6 +121,8 @@ export class MapScene {
     depthWrite: false
   });
   private sites: SiteMarker[] = [];
+  private linksVisible = true;
+  private previousLinkElapsed = 0;
   private animationFrame = 0;
   private theme: "dark" | "light" = "dark";
   private disposed = false;
@@ -168,6 +183,26 @@ export class MapScene {
     this.clearLinks();
     this.addLinks(links);
     this.renderVisibleMarkers();
+  }
+
+  setLinksVisible(visible: boolean): void {
+    if (this.linksVisible === visible) {
+      return;
+    }
+
+    this.linksVisible = visible;
+
+    if (visible) {
+      this.restartLinkPackets();
+    }
+  }
+
+  getLinksVisible(): boolean {
+    return this.linksVisible;
+  }
+
+  getLinkCount(): number {
+    return this.links.length;
   }
 
   setVisibleStatuses(statuses: ReadonlySet<RimuStatus>): void {
@@ -298,25 +333,39 @@ export class MapScene {
       const end = this.projectLatLng(link.endLat, link.endLng, COUNTRY_DEPTH + 0.34);
       const distance = start.distanceTo(end);
       const midpoint = start.clone().lerp(end, 0.5);
-      midpoint.y += Math.min(15, 2.8 + distance * 0.2);
+      midpoint.y += getLinkArcLift(distance);
 
       const curve = new THREE.QuadraticBezierCurve3(start, midpoint, end);
-      const geometry = new THREE.BufferGeometry().setFromPoints(curve.getPoints(42));
-      const material = new THREE.LineDashedMaterial({
-        color: LINK_COLORS[link.type] ?? "#31d7ff",
-        dashSize: 1.4,
-        gapSize: 0.9,
-        linewidth: 1,
-        transparent: true,
-        opacity: 0.78,
-        depthWrite: false
-      });
-      const line = new THREE.Line(geometry, material);
-      line.computeLineDistances();
-      this.linkGroup.add(line);
+      const group = new THREE.Group();
+      const packets: LinkPacketVisual[] = [];
+
+      for (let index = 0; index < LINK_PACKET_COUNT; index++) {
+        const packetGeometry = new THREE.IcosahedronGeometry(LINK_PACKET_RADIUS, 1);
+        const packetMaterial = new THREE.MeshBasicMaterial({
+          color: LINK_RAINBOW_COLORS[(index * 2) % LINK_RAINBOW_COLORS.length],
+          transparent: true,
+          opacity: 0.95,
+          depthWrite: false
+        });
+        const packet = new THREE.Mesh(packetGeometry, packetMaterial);
+        const delay = index / LINK_PACKET_COUNT;
+
+        packet.visible = false;
+        packets.push({
+          mesh: packet,
+          progress: this.linksVisible ? -delay : 1,
+          delay
+        });
+        group.add(packet);
+      }
+
+      group.visible = this.linksVisible;
+      this.linkGroup.add(group);
       this.links.push({
-        line,
-        speed: link.type === "900M" ? 1.05 : 0.78
+        group,
+        curve,
+        packets,
+        speed: getLinkPacketSpeed(link)
       });
     }
   }
@@ -401,7 +450,7 @@ export class MapScene {
 
   private clearMarkers(): void {
     for (const marker of this.markers) {
-      marker.group.traverse((object) => this.disposeMeshResources(object));
+      marker.group.traverse((object) => this.disposeObjectResources(object));
     }
 
     this.markerGroup.clear();
@@ -410,23 +459,39 @@ export class MapScene {
   }
 
   private clearLinks(): void {
+    for (const link of this.links) {
+      link.group.traverse((object) => this.disposeObjectResources(object));
+    }
+
     this.linkGroup.clear();
     this.links.length = 0;
   }
 
-  private disposeMeshResources(object: THREE.Object3D): void {
-    if (!(object instanceof THREE.Mesh)) {
-      return;
+  private restartLinkPackets(): void {
+    for (const link of this.links) {
+      link.group.visible = true;
+
+      for (const packet of link.packets) {
+        packet.progress = -packet.delay;
+        packet.mesh.visible = false;
+      }
     }
+  }
 
-    object.geometry.dispose();
+  private disposeObjectResources(object: THREE.Object3D): void {
+    const renderable = object as THREE.Object3D & {
+      geometry?: { dispose: () => void };
+      material?: THREE.Material | THREE.Material[];
+    };
 
-    if (Array.isArray(object.material)) {
-      for (const material of object.material) {
+    renderable.geometry?.dispose();
+
+    if (Array.isArray(renderable.material)) {
+      for (const material of renderable.material) {
         material.dispose();
       }
-    } else {
-      object.material.dispose();
+    } else if (renderable.material) {
+      renderable.material.dispose();
     }
   }
 
@@ -527,9 +592,42 @@ export class MapScene {
   }
 
   private updateLinks(elapsed: number): void {
+    const delta = Math.min(0.05, Math.max(0, elapsed - this.previousLinkElapsed));
+    this.previousLinkElapsed = elapsed;
+
     for (const link of this.links) {
-      const pulse = (Math.sin(elapsed * link.speed * Math.PI) + 1) / 2;
-      link.line.material.opacity = 0.58 + pulse * 0.24;
+      let hasActivePackets = false;
+
+      for (let index = 0; index < link.packets.length; index++) {
+        const packet = link.packets[index];
+        const wasSent = packet.progress >= 0;
+
+        if (this.linksVisible || wasSent) {
+          packet.progress += delta * link.speed;
+        }
+
+        if (this.linksVisible) {
+          while (packet.progress >= 1) {
+            packet.progress -= 1;
+          }
+        }
+
+        if (packet.progress < 0 || packet.progress >= 1) {
+          packet.mesh.visible = false;
+          continue;
+        }
+
+        const pulse = (Math.sin((elapsed * 3.8 + index) * Math.PI) + 1) / 2;
+        const edgeFade = Math.min(1, packet.progress * 12, (1 - packet.progress) * 12);
+
+        packet.mesh.visible = true;
+        packet.mesh.position.copy(link.curve.getPointAt(packet.progress));
+        packet.mesh.scale.setScalar(0.82 + pulse * 0.28);
+        packet.mesh.material.opacity = edgeFade * (0.62 + pulse * 0.32);
+        hasActivePackets = true;
+      }
+
+      link.group.visible = this.linksVisible || hasActivePackets;
     }
   }
 
@@ -752,6 +850,27 @@ function closePoints(points: THREE.Vector3[]): THREE.Vector3[] {
   }
 
   return [...points, first.clone()];
+}
+
+function getLinkArcLift(distance: number): number {
+  return THREE.MathUtils.clamp(0.24 + distance * 0.52, 0.18, 3.4);
+}
+
+function getLinkPacketSpeed(link: LinkArc): number {
+  const baseSpeed = link.type === "900M" ? 0.58 : 0.5;
+  const variance = (hashString(link.id) % 9) * 0.012;
+
+  return baseSpeed + variance;
+}
+
+function hashString(value: string): number {
+  let hash = 0;
+
+  for (let index = 0; index < value.length; index++) {
+    hash = (hash * 31 + value.charCodeAt(index)) % 997;
+  }
+
+  return hash;
 }
 
 function getAlertStrength(status: RimuStatus): number {
