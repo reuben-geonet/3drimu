@@ -247,10 +247,11 @@ p {
 
 #fullscreen-toggle {
   --control-accent: #8ea7ff;
-  --control-open-width: 10.35rem;
+  --control-open-width: 9.2rem;
 }
 
 #fullscreen-toggle.is-active {
+  --control-open-width: 10.35rem;
   border-color: color-mix(in srgb, var(--control-accent) 72%, transparent);
   background: color-mix(in srgb, var(--control-accent) 22%, var(--panel));
   color: var(--control-accent);
