@@ -34,6 +34,7 @@ interface MapSceneOptions {
     site: SiteMarker | null,
     point?: { x: number; y: number }
   ) => void;
+  onMarkerClick?: (site: SiteMarker) => void;
 }
 
 interface CountryProperties {
@@ -51,6 +52,7 @@ const WORLD_CENTER_Z = NZ_TARGET.lat * MAP_SCALE;
 const OCEAN_OVERSCAN = 360;
 // Status markers are composed from several meshes; scale the group so the glyph stays proportional.
 const STATUS_MARKER_SCALE = 0.25;
+const MARKER_CLICK_DRAG_TOLERANCE_PX = 6;
 
 const LINK_COLORS: Record<string, string> = {
   "5G": "#99ffcc",
@@ -79,6 +81,7 @@ export class MapScene {
   private readonly pointer = new THREE.Vector2();
   private readonly startedAt = performance.now();
   private readonly onMarkerHover?: MapSceneOptions["onMarkerHover"];
+  private readonly onMarkerClick?: MapSceneOptions["onMarkerClick"];
   private readonly landMaterial = new THREE.MeshStandardMaterial({
     roughness: 0.74,
     metalness: 0.05
@@ -108,10 +111,13 @@ export class MapScene {
   private animationFrame = 0;
   private theme: "dark" | "light" = "dark";
   private disposed = false;
+  private pointerDownPoint: { x: number; y: number } | null = null;
+  private pointerMovedAfterDown = false;
 
   constructor(container: HTMLElement, options: MapSceneOptions = {}) {
     this.container = container;
     this.onMarkerHover = options.onMarkerHover;
+    this.onMarkerClick = options.onMarkerClick;
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
       alpha: true,
@@ -143,6 +149,8 @@ export class MapScene {
     this.addLights();
 
     this.renderer.domElement.addEventListener("pointermove", this.onPointerMove);
+    this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown);
+    this.renderer.domElement.addEventListener("click", this.onClick);
     this.renderer.domElement.addEventListener("pointerleave", this.clearHover);
     window.addEventListener("resize", this.onResize);
     this.refreshMapColors();
@@ -190,6 +198,8 @@ export class MapScene {
     cancelAnimationFrame(this.animationFrame);
     window.removeEventListener("resize", this.onResize);
     this.renderer.domElement.removeEventListener("pointermove", this.onPointerMove);
+    this.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown);
+    this.renderer.domElement.removeEventListener("click", this.onClick);
     this.renderer.domElement.removeEventListener("pointerleave", this.clearHover);
     this.cameraRig.dispose();
     this.renderer.dispose();
@@ -569,28 +579,64 @@ export class MapScene {
   };
 
   private onPointerMove = (event: PointerEvent): void => {
-    const rect = this.renderer.domElement.getBoundingClientRect();
-    this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-    this.raycaster.setFromCamera(this.pointer, this.camera);
+    this.updatePointerMoved(event.clientX, event.clientY);
+    const site = this.getSiteAtPoint(event.clientX, event.clientY);
 
-    const hit = this.raycaster.intersectObjects(this.pickables, false)[0];
-
-    if (!hit) {
+    if (!site) {
       this.clearHover();
       return;
     }
 
-    const site = hit.object.userData.site as SiteMarker | undefined;
+    this.renderer.domElement.style.cursor = "pointer";
+    this.onMarkerHover?.(site, { x: event.clientX, y: event.clientY });
+  };
+
+  private onPointerDown = (event: PointerEvent): void => {
+    this.pointerDownPoint = { x: event.clientX, y: event.clientY };
+    this.pointerMovedAfterDown = false;
+  };
+
+  private onClick = (event: MouseEvent): void => {
+    if (this.pointerMovedAfterDown) {
+      return;
+    }
+
+    const site = this.getSiteAtPoint(event.clientX, event.clientY);
 
     if (site) {
-      this.onMarkerHover?.(site, { x: event.clientX, y: event.clientY });
+      this.onMarkerClick?.(site);
     }
   };
 
   private clearHover = (): void => {
+    this.renderer.domElement.style.cursor = "";
     this.onMarkerHover?.(null);
   };
+
+  private updatePointerMoved(clientX: number, clientY: number): void {
+    if (!this.pointerDownPoint || this.pointerMovedAfterDown) {
+      return;
+    }
+
+    const distance = Math.hypot(
+      clientX - this.pointerDownPoint.x,
+      clientY - this.pointerDownPoint.y
+    );
+
+    this.pointerMovedAfterDown = distance > MARKER_CLICK_DRAG_TOLERANCE_PX;
+  }
+
+  private getSiteAtPoint(clientX: number, clientY: number): SiteMarker | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+
+    const hit = this.raycaster.intersectObjects(this.pickables, false)[0];
+    const site = hit?.object.userData.site as SiteMarker | undefined;
+
+    return site ?? null;
+  }
 }
 
 function getCountries(): FeatureCollection<Geometry, CountryProperties> {

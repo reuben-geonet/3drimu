@@ -1,5 +1,5 @@
 import "./styles.css";
-import { loadRimuMapData } from "./api";
+import { getRimuChartUrl, loadRimuMapData } from "./api";
 import { MapScene, renderLegend } from "./scene";
 import { RIMU_STATUSES, STATUS_LABELS } from "./status";
 import { ThemeController } from "./theme";
@@ -30,7 +30,8 @@ const refreshData = requiredElement<HTMLButtonElement>("refresh-data");
 
 const theme = new ThemeController(themeToggle);
 const map = new MapScene(sceneRoot, {
-  onMarkerHover: renderTooltip
+  onMarkerHover: renderTooltip,
+  onMarkerClick: openRimuChart
 });
 const visibleStatuses = new Set<RimuStatus>(RIMU_STATUSES);
 
@@ -111,6 +112,10 @@ function renderTooltip(site: SiteMarker | null, point?: { x: number; y: number }
   tooltip.style.left = `${Math.min(point.x + 16, window.innerWidth - 360)}px`;
   tooltip.style.top = `${Math.min(point.y + 16, window.innerHeight - 220)}px`;
   tooltip.classList.add("is-visible");
+}
+
+function openRimuChart(site: SiteMarker): void {
+  window.open(getRimuChartUrl(site.locality), "_blank", "noopener,noreferrer");
 }
 
 function onLegendClick(event: MouseEvent): void {

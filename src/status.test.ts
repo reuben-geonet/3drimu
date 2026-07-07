@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMapData } from "./api";
+import { buildMapData, getRimuChartUrl } from "./api";
 import { computeLocalityStatus } from "./status";
 import type { FaultsResponse, RimuGeoJson } from "./types";
 
@@ -102,5 +102,19 @@ describe("buildMapData", () => {
     expect(data.sites[0]?.status).toBe("ok");
     expect(data.links).toHaveLength(1);
     expect(data.links[0]?.type).toBe("5G");
+  });
+});
+
+describe("getRimuChartUrl", () => {
+  it("builds a RIMU chart URL for a locality", () => {
+    expect(getRimuChartUrl("stoutstreet")).toBe(
+      "https://rimu.geonet.org.nz/#/chart?location=stoutstreet"
+    );
+  });
+
+  it("encodes locality values for the hash query", () => {
+    expect(getRimuChartUrl("test site/a")).toBe(
+      "https://rimu.geonet.org.nz/#/chart?location=test%20site%2Fa"
+    );
   });
 });
