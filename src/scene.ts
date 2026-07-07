@@ -30,6 +30,7 @@ interface MarkerVisual {
   ring: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
   activeHalo: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
   activeGlow: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
+  activeOrbitRings: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>[];
   phase: number;
   speed: number;
   alertStrength: number;
@@ -658,6 +659,7 @@ export class MapScene {
     const ringGeometry = new THREE.TorusGeometry(0.92, 0.035, 8, 36);
     const activeHaloGeometry = new THREE.TorusGeometry(1.48, 0.05, 8, 48);
     const activeGlowGeometry = new THREE.SphereGeometry(0.78, 20, 14);
+    const activeOrbitRingGeometry = new THREE.TorusGeometry(0.92, 0.035, 8, 36);
 
     for (const site of sites) {
       const color = new THREE.Color(STATUS_COLORS[site.status]);
@@ -733,7 +735,30 @@ export class MapScene {
       activeHalo.visible = false;
       activeHalo.renderOrder = 9;
 
-      group.add(activeGlow, base, beam, ring, activeHalo);
+      const activeOrbitRings = Array.from(
+        { length: DEMO_ACTIVE_MARKER.orbitRingCount },
+        (_, index) => {
+          const orbitRing = new THREE.Mesh(
+            activeOrbitRingGeometry,
+            new THREE.MeshBasicMaterial({
+              color: this.activeMarkerHaloColor,
+              transparent: true,
+              opacity: 0,
+              blending: THREE.AdditiveBlending,
+              depthWrite: false
+            })
+          );
+
+          orbitRing.rotation.x = Math.PI / 2;
+          orbitRing.position.y = 0.22;
+          orbitRing.visible = false;
+          orbitRing.renderOrder = 10 + index;
+
+          return orbitRing;
+        }
+      );
+
+      group.add(activeGlow, base, beam, ring, activeHalo, ...activeOrbitRings);
       this.markerGroup.add(group);
       this.markers.push({
         site,
@@ -744,6 +769,7 @@ export class MapScene {
         ring,
         activeHalo,
         activeGlow,
+        activeOrbitRings,
         phase: Math.random() * Math.PI * 2,
         speed: 1.2 + Math.random() * 0.8 + alertStrength * 0.6,
         alertStrength
@@ -1395,11 +1421,18 @@ export class MapScene {
         marker.activeHalo.material.opacity =
           (activeMarkerStrength * (0.46 + activeWave * 0.28) + flash * 0.22) *
           zoomStyle.effectOpacityMultiplier;
+        this.updateActiveOrbitRings(
+          marker,
+          focusAgeMs,
+          activeMarkerStrength,
+          zoomStyle.effectOpacityMultiplier
+        );
       } else {
         marker.activeGlow.visible = false;
         marker.activeGlow.material.opacity = 0;
         marker.activeHalo.visible = false;
         marker.activeHalo.material.opacity = 0;
+        this.hideActiveOrbitRings(marker);
       }
 
       marker.base.scale.setScalar(baseScale);
@@ -1418,6 +1451,49 @@ export class MapScene {
     }
 
     return zoomStyle;
+  }
+
+  private updateActiveOrbitRings(
+    marker: MarkerVisual,
+    focusAgeMs: number,
+    activeMarkerStrength: number,
+    effectOpacityMultiplier: number
+  ): void {
+    for (let index = 0; index < marker.activeOrbitRings.length; index++) {
+      const orbitRing = marker.activeOrbitRings[index];
+      const delayedAge =
+        focusAgeMs - index * DEMO_ACTIVE_MARKER.orbitRingStaggerMs;
+
+      if (delayedAge < 0 || activeMarkerStrength <= 0) {
+        orbitRing.visible = false;
+        orbitRing.material.opacity = 0;
+        continue;
+      }
+
+      const progress =
+        (delayedAge % DEMO_ACTIVE_MARKER.orbitRingDurationMs) /
+        DEMO_ACTIVE_MARKER.orbitRingDurationMs;
+      const expansion = easeOutCubic(progress);
+      const fade = (1 - progress) ** 1.8;
+
+      orbitRing.visible = true;
+      orbitRing.scale.setScalar(
+        DEMO_ACTIVE_MARKER.orbitRingBaseScale +
+          expansion * DEMO_ACTIVE_MARKER.orbitRingExpandScale
+      );
+      orbitRing.material.opacity =
+        fade *
+        DEMO_ACTIVE_MARKER.orbitRingOpacity *
+        effectOpacityMultiplier *
+        activeMarkerStrength;
+    }
+  }
+
+  private hideActiveOrbitRings(marker: MarkerVisual): void {
+    for (const orbitRing of marker.activeOrbitRings) {
+      orbitRing.visible = false;
+      orbitRing.material.opacity = 0;
+    }
   }
 
   private updateLinks(
