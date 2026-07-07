@@ -1,0 +1,762 @@
+import * as THREE from "three";
+import { feature } from "topojson-client";
+import countries50m from "world-atlas/countries-50m.json";
+import type {
+  FeatureCollection,
+  Geometry,
+  MultiPolygon,
+  Polygon,
+  Position
+} from "geojson";
+import type { GeometryCollection, Topology } from "topojson-specification";
+import { MapCameraRig } from "./cameraRig";
+import { RIMU_STATUSES, STATUS_COLORS, STATUS_LABELS } from "./status";
+import type { LinkArc, RimuStatus, SiteMarker } from "./types";
+
+interface MarkerVisual {
+  site: SiteMarker;
+  group: THREE.Group;
+  base: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
+  beam: THREE.Mesh<THREE.CylinderGeometry, THREE.MeshBasicMaterial>;
+  ring: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
+  phase: number;
+  speed: number;
+  alertStrength: number;
+}
+
+interface LinkVisual {
+  line: THREE.Line<THREE.BufferGeometry, THREE.LineDashedMaterial>;
+  speed: number;
+}
+
+interface MapSceneOptions {
+  onMarkerHover?: (
+    site: SiteMarker | null,
+    point?: { x: number; y: number }
+  ) => void;
+}
+
+interface CountryProperties {
+  name?: string;
+}
+
+const NZ_TARGET = { lat: -41.35, lng: 174.9 };
+const MAP_SCALE = 1.65;
+const LON_SCALE = MAP_SCALE * Math.cos((NZ_TARGET.lat * Math.PI) / 180);
+const COUNTRY_DEPTH = 1.25;
+const MAP_MARGIN = 32;
+const WORLD_WIDTH = 360 * LON_SCALE;
+const WORLD_HEIGHT = 180 * MAP_SCALE;
+const WORLD_CENTER_Z = NZ_TARGET.lat * MAP_SCALE;
+const OCEAN_OVERSCAN = 360;
+// Status markers are composed from several meshes; scale the group so the glyph stays proportional.
+const STATUS_MARKER_SCALE = 0.25;
+
+const LINK_COLORS: Record<string, string> = {
+  "5G": "#99ffcc",
+  "2G": "#81d4fa",
+  "900M": "#ff7df0",
+  "400M": "#c178ff"
+};
+
+export class MapScene {
+  private readonly container: HTMLElement;
+  private readonly renderer: THREE.WebGLRenderer;
+  private readonly scene = new THREE.Scene();
+  private readonly camera: THREE.PerspectiveCamera;
+  private readonly cameraRig: MapCameraRig;
+  private readonly mapGroup = new THREE.Group();
+  private readonly countryGroup = new THREE.Group();
+  private readonly borderGroup = new THREE.Group();
+  private readonly gridGroup = new THREE.Group();
+  private readonly linkGroup = new THREE.Group();
+  private readonly markerGroup = new THREE.Group();
+  private readonly markers: MarkerVisual[] = [];
+  private readonly links: LinkVisual[] = [];
+  private readonly pickables: THREE.Object3D[] = [];
+  private readonly visibleStatuses = new Set<RimuStatus>(RIMU_STATUSES);
+  private readonly raycaster = new THREE.Raycaster();
+  private readonly pointer = new THREE.Vector2();
+  private readonly startedAt = performance.now();
+  private readonly onMarkerHover?: MapSceneOptions["onMarkerHover"];
+  private readonly landMaterial = new THREE.MeshStandardMaterial({
+    roughness: 0.74,
+    metalness: 0.05
+  });
+  private readonly nzMaterial = new THREE.MeshStandardMaterial({
+    roughness: 0.58,
+    metalness: 0.08
+  });
+  private readonly oceanMaterial = new THREE.MeshStandardMaterial({
+    roughness: 0.82,
+    metalness: 0.02,
+    transparent: true
+  });
+  private readonly borderMaterial = new THREE.LineBasicMaterial({
+    transparent: true,
+    depthWrite: false
+  });
+  private readonly nzBorderMaterial = new THREE.LineBasicMaterial({
+    transparent: true,
+    depthWrite: false
+  });
+  private readonly gridMaterial = new THREE.LineBasicMaterial({
+    transparent: true,
+    depthWrite: false
+  });
+  private sites: SiteMarker[] = [];
+  private animationFrame = 0;
+  private theme: "dark" | "light" = "dark";
+  private disposed = false;
+
+  constructor(container: HTMLElement, options: MapSceneOptions = {}) {
+    this.container = container;
+    this.onMarkerHover = options.onMarkerHover;
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      powerPreference: "high-performance",
+      preserveDrawingBuffer: true
+    });
+
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setSize(this.container.clientWidth, this.container.clientHeight);
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.container.appendChild(this.renderer.domElement);
+
+    this.cameraRig = new MapCameraRig({
+      aspect: this.container.clientWidth / this.container.clientHeight,
+      domElement: this.renderer.domElement,
+      target: this.getNzTarget()
+    });
+    this.camera = this.cameraRig.camera;
+
+    this.mapGroup.add(this.createOceanSurface());
+    this.mapGroup.add(this.gridGroup, this.countryGroup, this.borderGroup);
+    this.scene.add(this.mapGroup);
+    this.scene.add(this.linkGroup, this.markerGroup);
+    this.scene.add(this.createStars());
+    this.createGrid();
+    this.createCountries();
+    this.addLights();
+
+    this.renderer.domElement.addEventListener("pointermove", this.onPointerMove);
+    this.renderer.domElement.addEventListener("pointerleave", this.clearHover);
+    window.addEventListener("resize", this.onResize);
+    this.refreshMapColors();
+    this.animate();
+  }
+
+  setTheme(theme: "dark" | "light"): void {
+    this.theme = theme;
+    this.scene.background = new THREE.Color(theme === "dark" ? "#020407" : "#e7eef5");
+    this.refreshMapColors();
+  }
+
+  setData(sites: SiteMarker[], links: LinkArc[]): void {
+    this.sites = sites;
+    this.clearLinks();
+    this.addLinks(links);
+    this.renderVisibleMarkers();
+  }
+
+  setVisibleStatuses(statuses: ReadonlySet<RimuStatus>): void {
+    this.visibleStatuses.clear();
+
+    for (const status of statuses) {
+      this.visibleStatuses.add(status);
+    }
+
+    this.clearHover();
+    this.renderVisibleMarkers();
+  }
+
+  getVisibleSiteCount(): number {
+    return this.getVisibleSites().length;
+  }
+
+  startIntro(): Promise<void> {
+    return this.cameraRig.startIntro(this.getNzTarget());
+  }
+
+  resetView(): void {
+    this.cameraRig.resetView(this.getNzTarget());
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    cancelAnimationFrame(this.animationFrame);
+    window.removeEventListener("resize", this.onResize);
+    this.renderer.domElement.removeEventListener("pointermove", this.onPointerMove);
+    this.renderer.domElement.removeEventListener("pointerleave", this.clearHover);
+    this.cameraRig.dispose();
+    this.renderer.dispose();
+  }
+
+  private createOceanSurface(): THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial> {
+    const geometry = new THREE.PlaneGeometry(
+      WORLD_WIDTH + MAP_MARGIN * 2 + OCEAN_OVERSCAN,
+      WORLD_HEIGHT + MAP_MARGIN * 2 + OCEAN_OVERSCAN
+    );
+    geometry.rotateX(-Math.PI / 2);
+
+    const mesh = new THREE.Mesh(geometry, this.oceanMaterial);
+    mesh.position.z = WORLD_CENTER_Z;
+    mesh.receiveShadow = true;
+
+    return mesh;
+  }
+
+  private createGrid(): void {
+    const lineMaterial = this.gridMaterial;
+
+    for (let lat = -60; lat <= 60; lat += 30) {
+      const points: THREE.Vector3[] = [];
+
+      for (let deltaLng = -180; deltaLng <= 180; deltaLng += 6) {
+        points.push(this.projectDelta(deltaLng, lat, 0.05));
+      }
+
+      this.gridGroup.add(this.createLine(points, lineMaterial));
+    }
+
+    for (let deltaLng = -180; deltaLng <= 180; deltaLng += 30) {
+      const points: THREE.Vector3[] = [];
+
+      for (let lat = -75; lat <= 75; lat += 4) {
+        points.push(this.projectDelta(deltaLng, lat, 0.05));
+      }
+
+      this.gridGroup.add(this.createLine(points, lineMaterial));
+    }
+  }
+
+  private createCountries(): void {
+    const countries = getCountries();
+
+    for (const country of countries.features) {
+      const geometry = country.geometry;
+
+      if (!isPolygonGeometry(geometry)) {
+        continue;
+      }
+
+      const name = country.properties?.name ?? "";
+      const isNewZealand = name === "New Zealand";
+      const material = isNewZealand ? this.nzMaterial : this.landMaterial;
+      const borderMaterial = isNewZealand
+        ? this.nzBorderMaterial
+        : this.borderMaterial;
+
+      for (const polygon of getPolygons(geometry)) {
+        const shape = createShape(polygon);
+
+        if (!shape) {
+          continue;
+        }
+
+        const countryGeometry = new THREE.ExtrudeGeometry(shape, {
+          depth: COUNTRY_DEPTH,
+          bevelEnabled: false,
+          curveSegments: 1,
+          steps: 1
+        });
+        countryGeometry.rotateX(-Math.PI / 2);
+        countryGeometry.computeVertexNormals();
+
+        const mesh = new THREE.Mesh(countryGeometry, material);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        this.countryGroup.add(mesh);
+
+        for (const ring of polygon) {
+          const points = projectRingToWorld(ring, COUNTRY_DEPTH + 0.08);
+
+          if (points.length > 2) {
+            this.borderGroup.add(this.createLine(points, borderMaterial));
+          }
+        }
+      }
+    }
+  }
+
+  private addLinks(links: LinkArc[]): void {
+    for (const link of links) {
+      const start = this.projectLatLng(link.startLat, link.startLng, COUNTRY_DEPTH + 0.34);
+      const end = this.projectLatLng(link.endLat, link.endLng, COUNTRY_DEPTH + 0.34);
+      const distance = start.distanceTo(end);
+      const midpoint = start.clone().lerp(end, 0.5);
+      midpoint.y += Math.min(15, 2.8 + distance * 0.2);
+
+      const curve = new THREE.QuadraticBezierCurve3(start, midpoint, end);
+      const geometry = new THREE.BufferGeometry().setFromPoints(curve.getPoints(42));
+      const material = new THREE.LineDashedMaterial({
+        color: LINK_COLORS[link.type] ?? "#31d7ff",
+        dashSize: 1.4,
+        gapSize: 0.9,
+        linewidth: 1,
+        transparent: true,
+        opacity: 0.78,
+        depthWrite: false
+      });
+      const line = new THREE.Line(geometry, material);
+      line.computeLineDistances();
+      this.linkGroup.add(line);
+      this.links.push({
+        line,
+        speed: link.type === "900M" ? 1.05 : 0.78
+      });
+    }
+  }
+
+  private addMarkers(sites: SiteMarker[]): void {
+    const sphereGeometry = new THREE.SphereGeometry(0.56, 16, 12);
+    const beamGeometry = new THREE.CylinderGeometry(0.08, 0.24, 4.4, 10, 1, true);
+    const ringGeometry = new THREE.TorusGeometry(0.92, 0.035, 8, 36);
+
+    for (const site of sites) {
+      const color = new THREE.Color(STATUS_COLORS[site.status]);
+      const group = new THREE.Group();
+      const surface = this.projectLatLng(site.lat, site.lng, COUNTRY_DEPTH + 0.32);
+      const alertStrength = getAlertStrength(site.status);
+
+      group.position.copy(surface);
+      group.scale.setScalar(STATUS_MARKER_SCALE);
+
+      const base = new THREE.Mesh(
+        sphereGeometry,
+        new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.96
+        })
+      );
+      base.position.y = 0.18;
+      base.scale.setScalar(1 + alertStrength * 0.25);
+      base.userData.site = site;
+
+      const beam = new THREE.Mesh(
+        beamGeometry,
+        new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.16 + alertStrength * 0.18,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        })
+      );
+      beam.position.y = 2.25;
+      beam.userData.site = site;
+
+      const ring = new THREE.Mesh(
+        ringGeometry,
+        new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.35 + alertStrength * 0.14,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        })
+      );
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = 0.22;
+      ring.userData.site = site;
+
+      group.add(base, beam, ring);
+      this.markerGroup.add(group);
+      this.pickables.push(base, beam, ring);
+      this.markers.push({
+        site,
+        group,
+        base,
+        beam,
+        ring,
+        phase: Math.random() * Math.PI * 2,
+        speed: 1.2 + Math.random() * 0.8 + alertStrength * 0.6,
+        alertStrength
+      });
+    }
+  }
+
+  private renderVisibleMarkers(): void {
+    this.clearMarkers();
+    this.addMarkers(this.getVisibleSites());
+  }
+
+  private getVisibleSites(): SiteMarker[] {
+    return this.sites.filter((site) => this.visibleStatuses.has(site.status));
+  }
+
+  private clearMarkers(): void {
+    for (const marker of this.markers) {
+      marker.group.traverse((object) => this.disposeMeshResources(object));
+    }
+
+    this.markerGroup.clear();
+    this.markers.length = 0;
+    this.pickables.length = 0;
+  }
+
+  private clearLinks(): void {
+    this.linkGroup.clear();
+    this.links.length = 0;
+  }
+
+  private disposeMeshResources(object: THREE.Object3D): void {
+    if (!(object instanceof THREE.Mesh)) {
+      return;
+    }
+
+    object.geometry.dispose();
+
+    if (Array.isArray(object.material)) {
+      for (const material of object.material) {
+        material.dispose();
+      }
+    } else {
+      object.material.dispose();
+    }
+  }
+
+  private addLights(): void {
+    const ambient = new THREE.HemisphereLight("#d9f7ff", "#0c141d", 0.78);
+    const key = new THREE.DirectionalLight("#ffffff", 2.2);
+    const fill = new THREE.DirectionalLight("#31d7ff", 0.62);
+
+    key.position.set(-140, 220, 120);
+    key.castShadow = true;
+    key.shadow.mapSize.width = 2048;
+    key.shadow.mapSize.height = 2048;
+    key.shadow.camera.left = -180;
+    key.shadow.camera.right = 180;
+    key.shadow.camera.top = 180;
+    key.shadow.camera.bottom = -180;
+    fill.position.set(180, 120, -160);
+    this.scene.add(ambient, key, fill);
+  }
+
+  private createStars(): THREE.Points {
+    const geometry = new THREE.BufferGeometry();
+    const count = 1300;
+    const positions = new Float32Array(count * 3);
+
+    for (let index = 0; index < count; index++) {
+      const radius = 620 + Math.random() * 760;
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      positions[index * 3] = radius * Math.sin(phi) * Math.cos(theta);
+      positions[index * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+      positions[index * 3 + 2] = radius * Math.cos(phi);
+    }
+
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+
+    return new THREE.Points(
+      geometry,
+      new THREE.PointsMaterial({
+        color: "#d9f7ff",
+        size: 1.15,
+        transparent: true,
+        opacity: 0.68,
+        depthWrite: false
+      })
+    );
+  }
+
+  private refreshMapColors(): void {
+    const dark = this.theme === "dark";
+
+    this.landMaterial.color.set(dark ? "#123a44" : "#edf5f2");
+    this.landMaterial.emissive.set(dark ? "#071820" : "#9fb5c4");
+    this.landMaterial.emissiveIntensity = dark ? 0.16 : 0.04;
+
+    this.nzMaterial.color.set(dark ? "#2c7b6f" : "#d7f0e7");
+    this.nzMaterial.emissive.set(dark ? "#0d302b" : "#78aa97");
+    this.nzMaterial.emissiveIntensity = dark ? 0.24 : 0.08;
+
+    this.oceanMaterial.color.set(dark ? "#061018" : "#d8e6ef");
+    this.oceanMaterial.opacity = dark ? 0.9 : 0.96;
+    this.oceanMaterial.emissive.set(dark ? "#02070b" : "#8aaabc");
+    this.oceanMaterial.emissiveIntensity = dark ? 0.22 : 0.05;
+
+    this.borderMaterial.color.set(dark ? "#81d4fa" : "#006f9f");
+    this.borderMaterial.opacity = dark ? 0.24 : 0.28;
+    this.nzBorderMaterial.color.set(dark ? "#d9fff4" : "#007a5d");
+    this.nzBorderMaterial.opacity = dark ? 0.72 : 0.62;
+    this.gridMaterial.color.set(dark ? "#31d7ff" : "#006f9f");
+    this.gridMaterial.opacity = dark ? 0.1 : 0.16;
+  }
+
+  private animate = (): void => {
+    if (this.disposed) {
+      return;
+    }
+
+    const elapsed = (performance.now() - this.startedAt) / 1000;
+    this.updateMarkers(elapsed);
+    this.updateLinks(elapsed);
+    this.cameraRig.update();
+    this.renderer.render(this.scene, this.camera);
+    this.animationFrame = requestAnimationFrame(this.animate);
+  };
+
+  private updateMarkers(elapsed: number): void {
+    for (const marker of this.markers) {
+      const wave = (Math.sin(elapsed * marker.speed + marker.phase) + 1) / 2;
+      const alertPulse = 1 + marker.alertStrength * 0.48 * wave;
+      const calmPulse = 1 + 0.14 * wave;
+
+      marker.base.scale.setScalar((1 + marker.alertStrength * 0.25) * calmPulse);
+      marker.beam.scale.set(1, alertPulse, 1);
+      marker.beam.material.opacity = 0.12 + marker.alertStrength * (0.24 + wave * 0.26);
+      marker.ring.scale.setScalar(1 + wave * (0.42 + marker.alertStrength * 0.54));
+      marker.ring.material.opacity = 0.18 + wave * (0.25 + marker.alertStrength * 0.2);
+    }
+  }
+
+  private updateLinks(elapsed: number): void {
+    for (const link of this.links) {
+      const pulse = (Math.sin(elapsed * link.speed * Math.PI) + 1) / 2;
+      link.line.material.opacity = 0.58 + pulse * 0.24;
+    }
+  }
+
+  private projectLatLng(lat: number, lng: number, y = 0): THREE.Vector3 {
+    const deltaLng = normalizeLngDelta(lng);
+
+    return this.projectDelta(deltaLng, lat, y);
+  }
+
+  private projectDelta(deltaLng: number, lat: number, y = 0): THREE.Vector3 {
+    return new THREE.Vector3(
+      deltaLng * LON_SCALE,
+      y,
+      (NZ_TARGET.lat - lat) * MAP_SCALE
+    );
+  }
+
+  private getNzTarget(): THREE.Vector3 {
+    const target = this.projectLatLng(
+      NZ_TARGET.lat,
+      NZ_TARGET.lng,
+      COUNTRY_DEPTH + 1.5
+    );
+    target.x -= 1.6;
+    target.z += 0.8;
+
+    return target;
+  }
+
+  private createLine(
+    points: THREE.Vector3[],
+    material: THREE.LineBasicMaterial
+  ): THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial> {
+    const closed = closePoints(points);
+    const geometry = new THREE.BufferGeometry().setFromPoints(closed);
+    const line = new THREE.Line(geometry, material);
+    line.renderOrder = 2;
+
+    return line;
+  }
+
+  private onResize = (): void => {
+    const width = this.container.clientWidth;
+    const height = this.container.clientHeight;
+    this.cameraRig.updateAspect(width, height);
+    this.renderer.setSize(width, height);
+  };
+
+  private onPointerMove = (event: PointerEvent): void => {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+
+    const hit = this.raycaster.intersectObjects(this.pickables, false)[0];
+
+    if (!hit) {
+      this.clearHover();
+      return;
+    }
+
+    const site = hit.object.userData.site as SiteMarker | undefined;
+
+    if (site) {
+      this.onMarkerHover?.(site, { x: event.clientX, y: event.clientY });
+    }
+  };
+
+  private clearHover = (): void => {
+    this.onMarkerHover?.(null);
+  };
+}
+
+function getCountries(): FeatureCollection<Geometry, CountryProperties> {
+  const topology = countries50m as unknown as Topology<{
+    countries: GeometryCollection;
+  }>;
+
+  return feature(topology, topology.objects.countries) as unknown as FeatureCollection<
+    Geometry,
+    CountryProperties
+  >;
+}
+
+function isPolygonGeometry(geometry: Geometry): geometry is Polygon | MultiPolygon {
+  return geometry.type === "Polygon" || geometry.type === "MultiPolygon";
+}
+
+function getPolygons(geometry: Polygon | MultiPolygon): Position[][][] {
+  return geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+}
+
+function createShape(polygon: Position[][]): THREE.Shape | null {
+  const [outerRing, ...holeRings] = polygon;
+
+  if (!outerRing) {
+    return null;
+  }
+
+  const outerPoints = ensureClockwise(projectRingToShape(outerRing));
+
+  if (outerPoints.length < 3) {
+    return null;
+  }
+
+  const shape = new THREE.Shape(outerPoints);
+
+  for (const holeRing of holeRings) {
+    const holePoints = ensureCounterClockwise(projectRingToShape(holeRing));
+
+    if (holePoints.length >= 3) {
+      shape.holes.push(new THREE.Path(holePoints));
+    }
+  }
+
+  return shape;
+}
+
+function projectRingToShape(ring: Position[]): THREE.Vector2[] {
+  let previousDelta: number | null = null;
+  const points: THREE.Vector2[] = [];
+
+  for (const position of ring) {
+    const lng = Number(position[0]);
+    const lat = Number(position[1]);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      continue;
+    }
+
+    let deltaLng = normalizeLngDelta(lng);
+
+    if (previousDelta !== null) {
+      while (deltaLng - previousDelta > 180) {
+        deltaLng -= 360;
+      }
+
+      while (deltaLng - previousDelta < -180) {
+        deltaLng += 360;
+      }
+    }
+
+    previousDelta = deltaLng;
+    points.push(
+      new THREE.Vector2(deltaLng * LON_SCALE, (lat - NZ_TARGET.lat) * MAP_SCALE)
+    );
+  }
+
+  return points;
+}
+
+function projectRingToWorld(ring: Position[], y: number): THREE.Vector3[] {
+  return projectRingToShape(ring).map((point) => new THREE.Vector3(point.x, y, -point.y));
+}
+
+function normalizeLngDelta(lng: number): number {
+  let delta = lng - NZ_TARGET.lng;
+
+  while (delta < -180) {
+    delta += 360;
+  }
+
+  while (delta >= 180) {
+    delta -= 360;
+  }
+
+  return delta;
+}
+
+function ensureClockwise(points: THREE.Vector2[]): THREE.Vector2[] {
+  return THREE.ShapeUtils.isClockWise(points) ? points : [...points].reverse();
+}
+
+function ensureCounterClockwise(points: THREE.Vector2[]): THREE.Vector2[] {
+  return THREE.ShapeUtils.isClockWise(points) ? [...points].reverse() : points;
+}
+
+function closePoints(points: THREE.Vector3[]): THREE.Vector3[] {
+  const [first] = points;
+  const last = points.at(-1);
+
+  if (!first || !last || first.distanceToSquared(last) < 0.0001) {
+    return points;
+  }
+
+  return [...points, first.clone()];
+}
+
+function getAlertStrength(status: RimuStatus): number {
+  switch (status) {
+    case "bad":
+      return 1;
+    case "overdue":
+      return 0.85;
+    case "warning":
+      return 0.65;
+    case "acknowledged":
+      return 0.35;
+    case "unknown":
+      return 0.2;
+    case "ok":
+    default:
+      return 0.08;
+  }
+}
+
+export function renderLegend(
+  container: HTMLElement,
+  visibleStatuses: ReadonlySet<RimuStatus>
+): void {
+  container.setAttribute("role", "group");
+  container.setAttribute("aria-label", "Toggle map marker statuses");
+  container.replaceChildren(
+    ...RIMU_STATUSES.map((status) => {
+      const label = STATUS_LABELS[status];
+      const active = visibleStatuses.has(status);
+      const button = document.createElement("button");
+      const swatch = document.createElement("span");
+      const buttonLabel = document.createElement("span");
+
+      button.type = "button";
+      button.className = "legend-button";
+      button.dataset.status = status;
+      button.style.setProperty("--status-color", STATUS_COLORS[status]);
+      button.setAttribute("aria-pressed", String(active));
+      button.setAttribute("aria-label", `${active ? "Hide" : "Show"} ${label} markers`);
+      button.classList.toggle("is-active", active);
+
+      swatch.className = "legend-swatch";
+      swatch.setAttribute("aria-hidden", "true");
+
+      buttonLabel.className = "legend-label";
+      buttonLabel.textContent = label;
+
+      button.append(swatch, buttonLabel);
+
+      return button;
+    })
+  );
+}
