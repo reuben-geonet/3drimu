@@ -15,6 +15,23 @@ export const DEMO_ANIMATION = {
   maxRetainedCards: 4
 } as const;
 
+export const DEMO_ACTIVE_MARKER = {
+  flashMs: 950,
+  enterMs: 520,
+  releaseMs: 760,
+  flashColor: "#fff7c2",
+  haloColor: "#ffd166",
+  activeBaseScaleBoost: 0.46,
+  activeBasePulseScale: 0.18,
+  activeBeamScaleBoost: 2.42,
+  activeBeamOpacityBoost: 0.42,
+  activeHaloBaseScale: 2.08,
+  activeHaloPulseScale: 0.62,
+  activeGlowBaseScale: 1.22,
+  activeGlowPulseScale: 0.32,
+  pulseSpeed: 5.2
+} as const;
+
 const DEMO_CARD_PANEL_SCALE = 0.5;
 const DEMO_CARD_CANVAS_WIDTH = 1024;
 const DEMO_CARD_CANVAS_HEIGHT = 640;

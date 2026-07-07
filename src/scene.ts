@@ -11,7 +11,7 @@ import type {
 import type { GeometryCollection, Topology } from "topojson-specification";
 import { MapCameraRig } from "./cameraRig";
 import { buildDemoRoute, formatMetricLabel } from "./demo";
-import { DEMO_ANIMATION, DEMO_CARD } from "./demoConfig";
+import { DEMO_ACTIVE_MARKER, DEMO_ANIMATION, DEMO_CARD } from "./demoConfig";
 import {
   getMarkerZoomStyle,
   pickNearestProjectedMarker,
@@ -24,9 +24,12 @@ import type { LinkArc, RimuStatus, SiteMarker } from "./types";
 interface MarkerVisual {
   site: SiteMarker;
   group: THREE.Group;
+  statusColor: THREE.Color;
   base: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   beam: THREE.Mesh<THREE.CylinderGeometry, THREE.MeshBasicMaterial>;
   ring: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
+  activeHalo: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
+  activeGlow: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   phase: number;
   speed: number;
   alertStrength: number;
@@ -129,6 +132,12 @@ export class MapScene {
   private readonly demoCards: DemoCardVisual[] = [];
   private readonly markerPickCandidates: ProjectedMarkerCandidate<SiteMarker>[] = [];
   private readonly markerProjection = new THREE.Vector3();
+  private readonly activeMarkerFlashColor = new THREE.Color(
+    DEMO_ACTIVE_MARKER.flashColor
+  );
+  private readonly activeMarkerHaloColor = new THREE.Color(
+    DEMO_ACTIVE_MARKER.haloColor
+  );
   private readonly visibleStatuses = new Set<RimuStatus>(RIMU_STATUSES);
   private readonly startedAt = performance.now();
   private readonly onMarkerHover?: MapSceneOptions["onMarkerHover"];
@@ -173,6 +182,9 @@ export class MapScene {
   private demoRouteIndex = 0;
   private demoLastSiteId: string | null = null;
   private demoCurrentSite: SiteMarker | null = null;
+  private demoFocusedSiteId: string | null = null;
+  private demoMarkerFocusStartedAt = 0;
+  private demoMarkerFocusReleasedAt: number | null = null;
   private activeDemoCard: DemoCardVisual | null = null;
 
   constructor(container: HTMLElement, options: MapSceneOptions = {}) {
@@ -324,6 +336,7 @@ export class MapScene {
     this.demoActive = true;
     this.demoGeneration++;
     this.demoCurrentSite = null;
+    this.clearDemoMarkerFocus();
     this.activeDemoCard = null;
     this.clearHover();
     this.rebuildDemoRoute();
@@ -345,6 +358,7 @@ export class MapScene {
     this.demoRoute = [];
     this.demoRouteIndex = 0;
     this.demoCurrentSite = null;
+    this.clearDemoMarkerFocus();
     this.activeDemoCard = null;
     this.cameraRig.cancelDemoMotion();
     this.fadeDemoCards(performance.now());
@@ -365,6 +379,7 @@ export class MapScene {
 
     this.demoGeneration++;
     this.demoCurrentSite = null;
+    this.clearDemoMarkerFocus();
     this.activeDemoCard = null;
     this.cameraRig.cancelDemoMotion();
     this.fadeDemoCards(performance.now());
@@ -407,6 +422,7 @@ export class MapScene {
         return;
       }
 
+      this.setDemoMarkerFocus(site);
       this.activeDemoCard = this.createDemoCard(site, target);
       await this.waitForDemoCardIntro(this.activeDemoCard, generation);
 
@@ -466,6 +482,26 @@ export class MapScene {
 
   private getDemoSiteTarget(site: SiteMarker): THREE.Vector3 {
     return this.projectLatLng(site.lat, site.lng, COUNTRY_DEPTH + 1.44);
+  }
+
+  private setDemoMarkerFocus(site: SiteMarker): void {
+    this.demoFocusedSiteId = site.id;
+    this.demoMarkerFocusStartedAt = performance.now();
+    this.demoMarkerFocusReleasedAt = null;
+  }
+
+  private releaseDemoMarkerFocus(): void {
+    if (this.demoFocusedSiteId === null || this.demoMarkerFocusReleasedAt !== null) {
+      return;
+    }
+
+    this.demoMarkerFocusReleasedAt = performance.now();
+  }
+
+  private clearDemoMarkerFocus(): void {
+    this.demoFocusedSiteId = null;
+    this.demoMarkerFocusStartedAt = 0;
+    this.demoMarkerFocusReleasedAt = null;
   }
 
   private getDemoStartAngle(target: THREE.Vector3): number {
@@ -620,6 +656,8 @@ export class MapScene {
     const sphereGeometry = new THREE.SphereGeometry(0.56, 16, 12);
     const beamGeometry = new THREE.CylinderGeometry(0.08, 0.24, 4.4, 10, 1, true);
     const ringGeometry = new THREE.TorusGeometry(0.92, 0.035, 8, 36);
+    const activeHaloGeometry = new THREE.TorusGeometry(1.48, 0.05, 8, 48);
+    const activeGlowGeometry = new THREE.SphereGeometry(0.78, 20, 14);
 
     for (const site of sites) {
       const color = new THREE.Color(STATUS_COLORS[site.status]);
@@ -666,14 +704,46 @@ export class MapScene {
       ring.rotation.x = Math.PI / 2;
       ring.position.y = 0.22;
 
-      group.add(base, beam, ring);
+      const activeGlow = new THREE.Mesh(
+        activeGlowGeometry,
+        new THREE.MeshBasicMaterial({
+          color: this.activeMarkerFlashColor,
+          transparent: true,
+          opacity: 0,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        })
+      );
+      activeGlow.position.y = 0.18;
+      activeGlow.visible = false;
+      activeGlow.renderOrder = 8;
+
+      const activeHalo = new THREE.Mesh(
+        activeHaloGeometry,
+        new THREE.MeshBasicMaterial({
+          color: this.activeMarkerHaloColor,
+          transparent: true,
+          opacity: 0,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        })
+      );
+      activeHalo.rotation.x = Math.PI / 2;
+      activeHalo.position.y = 0.24;
+      activeHalo.visible = false;
+      activeHalo.renderOrder = 9;
+
+      group.add(activeGlow, base, beam, ring, activeHalo);
       this.markerGroup.add(group);
       this.markers.push({
         site,
         group,
+        statusColor: color,
         base,
         beam,
         ring,
+        activeHalo,
+        activeGlow,
         phase: Math.random() * Math.PI * 2,
         speed: 1.2 + Math.random() * 0.8 + alertStrength * 0.6,
         alertStrength
@@ -881,6 +951,7 @@ export class MapScene {
   private async animateActiveDemoCardOut(generation: number): Promise<void> {
     const card = this.activeDemoCard;
     this.activeDemoCard = null;
+    this.releaseDemoMarkerFocus();
 
     if (!card) {
       return;
@@ -1205,38 +1276,145 @@ export class MapScene {
       return;
     }
 
-    const elapsed = (performance.now() - this.startedAt) / 1000;
+    const now = performance.now();
+    const elapsed = (now - this.startedAt) / 1000;
     this.cameraRig.update();
-    const zoomStyle = this.updateMarkers(elapsed);
+    const zoomStyle = this.updateMarkers(elapsed, now);
     this.updateLinks(elapsed, zoomStyle);
-    this.updateDemoCards(performance.now());
+    this.updateDemoCards(now);
     this.renderer.render(this.scene, this.camera);
     this.animationFrame = requestAnimationFrame(this.animate);
   };
 
-  private updateMarkers(elapsed: number): MarkerZoomStyle {
+  private updateMarkers(elapsed: number, now: number): MarkerZoomStyle {
     const zoomStyle = getMarkerZoomStyle({
       baseScale: STATUS_MARKER_SCALE,
       distance: this.cameraRig.getDistanceToTarget(),
       minDistance: this.cameraRig.getMinDistance(),
       referenceDistance: this.cameraRig.getDefaultDistance()
     });
+    const releaseProgress =
+      this.demoMarkerFocusReleasedAt === null
+        ? 0
+        : clamp01(
+            (now - this.demoMarkerFocusReleasedAt) / DEMO_ACTIVE_MARKER.releaseMs
+          );
+
+    if (this.demoMarkerFocusReleasedAt !== null && releaseProgress >= 1) {
+      this.clearDemoMarkerFocus();
+    }
+
+    const hasFocusedDemoMarker = this.demoActive && this.demoFocusedSiteId !== null;
+    const focusAgeMs = Math.max(0, now - this.demoMarkerFocusStartedAt);
+    const enterProgress = clamp01(focusAgeMs / DEMO_ACTIVE_MARKER.enterMs);
+    const enterStrength = easeInOutSine(enterProgress);
+    const releaseStrength =
+      this.demoMarkerFocusReleasedAt === null
+        ? 1
+        : 1 - easeInOutSine(releaseProgress);
+    const activeMarkerStrength = enterStrength * releaseStrength;
+    const flashProgress = clamp01(focusAgeMs / DEMO_ACTIVE_MARKER.flashMs);
+    const flash =
+      flashProgress < 1
+        ? (1 - flashProgress) *
+          (0.7 + 0.3 * ((Math.sin(focusAgeMs / 54) + 1) / 2)) *
+          activeMarkerStrength
+        : 0;
 
     for (const marker of this.markers) {
       const wave = (Math.sin(elapsed * marker.speed + marker.phase) + 1) / 2;
+      const activeWave =
+        (Math.sin(elapsed * DEMO_ACTIVE_MARKER.pulseSpeed + marker.phase) + 1) /
+        2;
+      const isFocusedDemoMarker =
+        hasFocusedDemoMarker && marker.site.id === this.demoFocusedSiteId;
       const alertPulse = 1 + marker.alertStrength * 0.48 * wave;
       const calmPulse = 1 + 0.14 * wave;
+      let baseScale = (1 + marker.alertStrength * 0.25) * calmPulse;
+      let beamScale = alertPulse;
+      let beamWidthScale = 1;
+      let beamOpacity = 0.12 + marker.alertStrength * (0.24 + wave * 0.26);
+      let ringScale = 1 + wave * (0.42 + marker.alertStrength * 0.54);
+      let ringOpacity = 0.18 + wave * (0.25 + marker.alertStrength * 0.2);
+
+      marker.base.material.color.copy(marker.statusColor);
+      marker.base.material.opacity = 0.96;
 
       marker.group.scale.setScalar(zoomStyle.groupScale);
-      marker.base.scale.setScalar((1 + marker.alertStrength * 0.25) * calmPulse);
-      marker.beam.scale.set(1, alertPulse, 1);
-      marker.beam.material.opacity =
-        (0.12 + marker.alertStrength * (0.24 + wave * 0.26)) *
-        zoomStyle.effectOpacityMultiplier;
-      marker.ring.scale.setScalar(1 + wave * (0.42 + marker.alertStrength * 0.54));
-      marker.ring.material.opacity =
-        (0.18 + wave * (0.25 + marker.alertStrength * 0.2)) *
-        zoomStyle.effectOpacityMultiplier;
+
+      if (isFocusedDemoMarker) {
+        marker.base.material.color.lerp(
+          this.activeMarkerFlashColor,
+          THREE.MathUtils.clamp(
+            activeMarkerStrength * 0.18 * activeWave + flash * 0.82,
+            0,
+            1
+          )
+        );
+        marker.base.material.opacity = 0.96 + activeMarkerStrength * 0.04;
+        baseScale *=
+          1 +
+          activeMarkerStrength *
+            (DEMO_ACTIVE_MARKER.activeBaseScaleBoost +
+              DEMO_ACTIVE_MARKER.activeBasePulseScale * activeWave) +
+          flash * 0.18;
+        beamScale +=
+          activeMarkerStrength *
+            (DEMO_ACTIVE_MARKER.activeBeamScaleBoost + activeWave * 0.28) +
+          flash * 0.18;
+        beamWidthScale += activeMarkerStrength * activeWave * 0.16 + flash * 0.12;
+        beamOpacity +=
+          activeMarkerStrength *
+            (DEMO_ACTIVE_MARKER.activeBeamOpacityBoost + activeWave * 0.15) +
+          flash * 0.2;
+        ringScale += activeMarkerStrength * activeWave * 0.36 + flash * 0.24;
+        ringOpacity += activeMarkerStrength * activeWave * 0.25 + flash * 0.22;
+
+        marker.activeGlow.visible = true;
+        marker.activeGlow.scale.setScalar(
+          1 +
+            activeMarkerStrength *
+              (DEMO_ACTIVE_MARKER.activeGlowBaseScale -
+                1 +
+                activeWave * DEMO_ACTIVE_MARKER.activeGlowPulseScale) +
+            flash * 0.42
+        );
+        marker.activeGlow.material.opacity =
+          (activeMarkerStrength * (0.16 + activeWave * 0.1) + flash * 0.28) *
+          zoomStyle.effectOpacityMultiplier;
+
+        marker.activeHalo.visible = true;
+        marker.activeHalo.scale.setScalar(
+          1 +
+            activeMarkerStrength *
+              (DEMO_ACTIVE_MARKER.activeHaloBaseScale -
+                1 +
+                activeWave * DEMO_ACTIVE_MARKER.activeHaloPulseScale) +
+            flash * 0.34
+        );
+        marker.activeHalo.material.opacity =
+          (activeMarkerStrength * (0.46 + activeWave * 0.28) + flash * 0.22) *
+          zoomStyle.effectOpacityMultiplier;
+      } else {
+        marker.activeGlow.visible = false;
+        marker.activeGlow.material.opacity = 0;
+        marker.activeHalo.visible = false;
+        marker.activeHalo.material.opacity = 0;
+      }
+
+      marker.base.scale.setScalar(baseScale);
+      marker.beam.scale.set(beamWidthScale, beamScale, beamWidthScale);
+      marker.beam.material.opacity = THREE.MathUtils.clamp(
+        beamOpacity * zoomStyle.effectOpacityMultiplier,
+        0,
+        0.92
+      );
+      marker.ring.scale.setScalar(ringScale);
+      marker.ring.material.opacity = THREE.MathUtils.clamp(
+        ringOpacity * zoomStyle.effectOpacityMultiplier,
+        0,
+        0.96
+      );
     }
 
     return zoomStyle;
