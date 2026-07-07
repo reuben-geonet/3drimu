@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="3D RIMU map showing live GeoNet site health markers."
+    />
+    <title>RIMU 3D Map</title>
+  </head>
+  <body>
+    <main id="app">
+      <div id="scene-root" aria-label="3D RIMU extruded world map"></div>
+
+      <section class="hud hud-top" aria-label="RIMU map controls">
+        <div class="toolbar">
+          <button
+            id="theme-toggle"
+            class="control-button"
+            type="button"
+            data-testid="theme-toggle"
+            aria-label="Switch to light mode"
+          >
+            <span class="control-icon" aria-hidden="true"></span>
+            <span class="control-label">Light</span>
+          </button>
+          <button
+            id="reset-view"
+            class="control-button"
+            type="button"
+            aria-label="Reset view"
+          >
+            <span class="control-icon" aria-hidden="true">
+              <svg
+                class="tabler-icon"
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M12 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" />
+                <path d="M4 8v-2a2 2 0 0 1 2 -2h2" />
+                <path d="M4 16v2a2 2 0 0 0 2 2h2" />
+                <path d="M16 4h2a2 2 0 0 1 2 2v2" />
+                <path d="M16 20h2a2 2 0 0 0 2 -2v-2" />
+              </svg>
+            </span>
+            <span class="control-label">Reset View</span>
+          </button>
+          <button
+            id="refresh-data"
+            class="control-button"
+            type="button"
+            aria-label="Refresh telemetry"
+          >
+            <span class="control-icon" aria-hidden="true">
+              <svg
+                class="tabler-icon"
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4" />
+                <path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4" />
+              </svg>
+            </span>
+            <span class="control-label">Refresh</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="hud hud-status" aria-label="RIMU status filters">
+        <div id="legend" class="legend"></div>
+      </section>
+
+      <div id="tooltip" class="tooltip" role="status" aria-live="polite"></div>
+
+      <section
+        id="loading-overlay"
+        class="loading-overlay"
+        data-testid="loading-overlay"
+        aria-label="Loading RIMU map"
+      >
+        <div class="loader-shell">
+          <div class="loader-orbit" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <h2>RIMU Map Link</h2>
+          <p id="loading-copy">Loading extruded world geometry and live site health</p>
+          <div class="loading-meter" aria-hidden="true">
+            <span></span>
+          </div>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
