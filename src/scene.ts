@@ -12,6 +12,12 @@ import type { GeometryCollection, Topology } from "topojson-specification";
 import { MapCameraRig } from "./cameraRig";
 import { buildDemoRoute, formatMetricLabel } from "./demo";
 import { DEMO_ANIMATION, DEMO_CARD } from "./demoConfig";
+import {
+  getMarkerZoomStyle,
+  pickNearestProjectedMarker,
+  type MarkerZoomStyle,
+  type ProjectedMarkerCandidate
+} from "./markerInteraction";
 import { RIMU_STATUSES, STATUS_COLORS, STATUS_LABELS } from "./status";
 import type { LinkArc, RimuStatus, SiteMarker } from "./types";
 
@@ -93,6 +99,7 @@ const STATUS_MARKER_SCALE = 0.25;
 const LINK_PACKET_RADIUS = 0.07;
 const LINK_PACKET_COUNT = 9;
 const MARKER_CLICK_DRAG_TOLERANCE_PX = 6;
+const MARKER_PICK_RADIUS_PX = 18;
 
 const LINK_RAINBOW_COLORS = [
   "#ff5f7e",
@@ -120,10 +127,9 @@ export class MapScene {
   private readonly markers: MarkerVisual[] = [];
   private readonly links: LinkVisual[] = [];
   private readonly demoCards: DemoCardVisual[] = [];
-  private readonly pickables: THREE.Object3D[] = [];
+  private readonly markerPickCandidates: ProjectedMarkerCandidate<SiteMarker>[] = [];
+  private readonly markerProjection = new THREE.Vector3();
   private readonly visibleStatuses = new Set<RimuStatus>(RIMU_STATUSES);
-  private readonly raycaster = new THREE.Raycaster();
-  private readonly pointer = new THREE.Vector2();
   private readonly startedAt = performance.now();
   private readonly onMarkerHover?: MapSceneOptions["onMarkerHover"];
   private readonly onMarkerClick?: MapSceneOptions["onMarkerClick"];
@@ -634,7 +640,6 @@ export class MapScene {
       );
       base.position.y = 0.18;
       base.scale.setScalar(1 + alertStrength * 0.25);
-      base.userData.site = site;
 
       const beam = new THREE.Mesh(
         beamGeometry,
@@ -647,7 +652,6 @@ export class MapScene {
         })
       );
       beam.position.y = 2.25;
-      beam.userData.site = site;
 
       const ring = new THREE.Mesh(
         ringGeometry,
@@ -661,11 +665,9 @@ export class MapScene {
       );
       ring.rotation.x = Math.PI / 2;
       ring.position.y = 0.22;
-      ring.userData.site = site;
 
       group.add(base, beam, ring);
       this.markerGroup.add(group);
-      this.pickables.push(base, beam, ring);
       this.markers.push({
         site,
         group,
@@ -695,7 +697,6 @@ export class MapScene {
 
     this.markerGroup.clear();
     this.markers.length = 0;
-    this.pickables.length = 0;
   }
 
   private clearLinks(): void {
@@ -1205,29 +1206,51 @@ export class MapScene {
     }
 
     const elapsed = (performance.now() - this.startedAt) / 1000;
-    this.updateMarkers(elapsed);
-    this.updateLinks(elapsed);
-    this.updateDemoCards(performance.now());
     this.cameraRig.update();
+    const zoomStyle = this.updateMarkers(elapsed);
+    this.updateLinks(elapsed, zoomStyle);
+    this.updateDemoCards(performance.now());
     this.renderer.render(this.scene, this.camera);
     this.animationFrame = requestAnimationFrame(this.animate);
   };
 
-  private updateMarkers(elapsed: number): void {
+  private updateMarkers(elapsed: number): MarkerZoomStyle {
+    const zoomStyle = getMarkerZoomStyle({
+      baseScale: STATUS_MARKER_SCALE,
+      distance: this.cameraRig.getDistanceToTarget(),
+      minDistance: this.cameraRig.getMinDistance(),
+      referenceDistance: this.cameraRig.getDefaultDistance()
+    });
+
     for (const marker of this.markers) {
       const wave = (Math.sin(elapsed * marker.speed + marker.phase) + 1) / 2;
       const alertPulse = 1 + marker.alertStrength * 0.48 * wave;
       const calmPulse = 1 + 0.14 * wave;
 
+      marker.group.scale.setScalar(zoomStyle.groupScale);
       marker.base.scale.setScalar((1 + marker.alertStrength * 0.25) * calmPulse);
       marker.beam.scale.set(1, alertPulse, 1);
-      marker.beam.material.opacity = 0.12 + marker.alertStrength * (0.24 + wave * 0.26);
+      marker.beam.material.opacity =
+        (0.12 + marker.alertStrength * (0.24 + wave * 0.26)) *
+        zoomStyle.effectOpacityMultiplier;
       marker.ring.scale.setScalar(1 + wave * (0.42 + marker.alertStrength * 0.54));
-      marker.ring.material.opacity = 0.18 + wave * (0.25 + marker.alertStrength * 0.2);
+      marker.ring.material.opacity =
+        (0.18 + wave * (0.25 + marker.alertStrength * 0.2)) *
+        zoomStyle.effectOpacityMultiplier;
     }
+
+    return zoomStyle;
   }
 
-  private updateLinks(elapsed: number): void {
+  private updateLinks(
+    elapsed: number,
+    zoomStyle = getMarkerZoomStyle({
+      baseScale: STATUS_MARKER_SCALE,
+      distance: this.cameraRig.getDistanceToTarget(),
+      minDistance: this.cameraRig.getMinDistance(),
+      referenceDistance: this.cameraRig.getDefaultDistance()
+    })
+  ): void {
     const delta = Math.min(0.18, Math.max(0, elapsed - this.previousLinkElapsed));
     this.previousLinkElapsed = elapsed;
 
@@ -1259,8 +1282,13 @@ export class MapScene {
 
         packet.mesh.visible = true;
         packet.mesh.position.copy(link.curve.getPointAt(packet.progress));
-        packet.mesh.scale.setScalar(0.82 + pulse * 0.28);
-        packet.mesh.material.opacity = edgeFade * (0.62 + pulse * 0.32);
+        packet.mesh.scale.setScalar(
+          (0.82 + pulse * 0.28) * zoomStyle.worldScaleMultiplier
+        );
+        packet.mesh.material.opacity =
+          edgeFade *
+          (0.62 + pulse * 0.32) *
+          zoomStyle.effectOpacityMultiplier;
         hasActivePackets = true;
       }
 
@@ -1372,14 +1400,28 @@ export class MapScene {
 
   private getSiteAtPoint(clientX: number, clientY: number): SiteMarker | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
-    this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
-    this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-    this.raycaster.setFromCamera(this.pointer, this.camera);
+    this.markerPickCandidates.length = 0;
 
-    const hit = this.raycaster.intersectObjects(this.pickables, false)[0];
-    const site = hit?.object.userData.site as SiteMarker | undefined;
+    for (const marker of this.markers) {
+      const projected = this.markerProjection
+        .copy(marker.group.position)
+        .project(this.camera);
 
-    return site ?? null;
+      this.markerPickCandidates.push({
+        item: marker.site,
+        screenX: ((projected.x + 1) / 2) * rect.width,
+        screenY: ((-projected.y + 1) / 2) * rect.height,
+        ndcX: projected.x,
+        ndcY: projected.y,
+        ndcZ: projected.z
+      });
+    }
+
+    return pickNearestProjectedMarker(
+      { x: clientX - rect.left, y: clientY - rect.top },
+      this.markerPickCandidates,
+      MARKER_PICK_RADIUS_PX
+    );
   }
 }
 

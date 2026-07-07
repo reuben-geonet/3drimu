@@ -200,6 +200,18 @@ export class MapCameraRig {
     this.camera.updateProjectionMatrix();
   }
 
+  getDistanceToTarget(): number {
+    return this.camera.position.distanceTo(this.controls.target);
+  }
+
+  getDefaultDistance(): number {
+    return CAMERA_VIEW.finalOffset.length();
+  }
+
+  getMinDistance(): number {
+    return CAMERA_VIEW.minDistance;
+  }
+
   dispose(): void {
     this.controls.dispose();
   }
