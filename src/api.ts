@@ -103,6 +103,10 @@ export async function loadRimuMapData(): Promise<MapData> {
   }
 }
 
+export function getRimuChartUrl(locality: string): string {
+  return `${RIMU_BASE_URL}/#/chart?location=${encodeURIComponent(locality)}`;
+}
+
 export function buildMapData(
   localities: RimuGeoJson,
   faults: FaultsResponse
