@@ -15,6 +15,8 @@ declare global {
     __RIMU_MAP_READY__?: boolean;
     __RIMU_SITE_COUNT__?: number;
     __RIMU_VISIBLE_SITE_COUNT__?: number;
+    __RIMU_LINK_COUNT__?: number;
+    __RIMU_LINKS_VISIBLE__?: boolean;
     __RIMU_LAST_LOAD_SOURCE__?: "live" | "fallback";
   }
 }
@@ -27,6 +29,7 @@ const tooltip = requiredElement("tooltip");
 const themeToggle = requiredElement<HTMLButtonElement>("theme-toggle");
 const resetView = requiredElement<HTMLButtonElement>("reset-view");
 const refreshData = requiredElement<HTMLButtonElement>("refresh-data");
+const toggleLinks = requiredElement<HTMLButtonElement>("toggle-links");
 
 const theme = new ThemeController(themeToggle);
 const map = new MapScene(sceneRoot, {
@@ -38,6 +41,7 @@ const visibleStatuses = new Set<RimuStatus>(RIMU_STATUSES);
 theme.onChange((nextTheme) => map.setTheme(nextTheme));
 map.setTheme(theme.theme);
 renderLegend(legend, visibleStatuses);
+syncLinkToggle();
 legend.addEventListener("click", onLegendClick);
 themeToggle.addEventListener("click", () => {
   playButtonAnimation(themeToggle, "is-theme-shifting", CONTROL_ANIMATION_MS);
@@ -47,6 +51,7 @@ resetView.addEventListener("click", () => {
   map.resetView();
 });
 refreshData.addEventListener("click", () => void refresh());
+toggleLinks.addEventListener("click", onToggleLinksClick);
 
 void boot();
 
@@ -61,6 +66,7 @@ async function boot(): Promise<void> {
   await delay(remaining);
   map.setData(data.sites, data.links);
   syncVisibleSiteCount();
+  syncLinkToggle();
   loadingOverlay.classList.add("is-hidden");
   await map.startIntro();
   window.__RIMU_MAP_READY__ = true;
@@ -77,6 +83,7 @@ async function refresh(): Promise<void> {
     const data = await loadRimuMapData();
     map.setData(data.sites, data.links);
     syncVisibleSiteCount();
+    syncLinkToggle();
     window.__RIMU_SITE_COUNT__ = data.sites.length;
     window.__RIMU_LAST_LOAD_SOURCE__ = data.loadedFromLiveApi ? "live" : "fallback";
   } finally {
@@ -136,6 +143,12 @@ function onLegendClick(event: MouseEvent): void {
   syncVisibleSiteCount();
 }
 
+function onToggleLinksClick(): void {
+  map.setLinksVisible(!map.getLinksVisible());
+  syncLinkToggle();
+  playButtonAnimation(toggleLinks, "is-link-toggling", CONTROL_ANIMATION_MS);
+}
+
 function getLegendStatus(target: EventTarget | null): RimuStatus | null {
   if (!(target instanceof Element)) {
     return null;
@@ -159,6 +172,16 @@ function isRimuStatus(status: string | undefined): status is RimuStatus {
 
 function syncVisibleSiteCount(): void {
   window.__RIMU_VISIBLE_SITE_COUNT__ = map.getVisibleSiteCount();
+}
+
+function syncLinkToggle(): void {
+  const visible = map.getLinksVisible();
+
+  toggleLinks.classList.toggle("is-active", visible);
+  toggleLinks.setAttribute("aria-pressed", String(visible));
+  toggleLinks.setAttribute("aria-label", `${visible ? "Hide" : "Show"} radio links`);
+  window.__RIMU_LINK_COUNT__ = map.getLinkCount();
+  window.__RIMU_LINKS_VISIBLE__ = visible;
 }
 
 function setLoadingCopy(copy: string): void {

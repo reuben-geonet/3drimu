@@ -114,7 +114,7 @@ test("loads the close extruded map view, keeps loading visible, and renders mark
   await expect(page.locator("canvas")).toBeVisible();
   await expect(page.locator(".brand-lockup")).toHaveCount(0);
   await expect(page.locator("#data-summary")).toHaveCount(0);
-  await expect(page.locator(".control-button .tabler-icon")).toHaveCount(3);
+  await expect(page.locator(".control-button .tabler-icon")).toHaveCount(4);
 
   const siteCount = await page.evaluate(() => window.__RIMU_SITE_COUNT__);
   expect(siteCount).toBe(3);
@@ -148,6 +148,33 @@ test("loads the close extruded map view, keeps loading visible, and renders mark
   });
 
   expect(nonBlankCanvas).toBe(true);
+});
+
+test("toggles radio links independently from marker statuses", async ({ page }) => {
+  await page.goto("/");
+  await page.waitForFunction(() => window.__RIMU_MAP_READY__ === true);
+
+  const linksToggle = page.getByTestId("toggle-links");
+
+  await expect(linksToggle).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(() => page.evaluate(() => window.__RIMU_LINK_COUNT__)).toBe(1);
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_LINKS_VISIBLE__))
+    .toBe(true);
+
+  await linksToggle.click();
+
+  await expect(linksToggle).toHaveAttribute("aria-pressed", "false");
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_LINKS_VISIBLE__))
+    .toBe(false);
+
+  await linksToggle.click();
+
+  await expect(linksToggle).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_LINKS_VISIBLE__))
+    .toBe(true);
 });
 
 test("toggles marker statuses from the top-left legend", async ({ page }) => {
