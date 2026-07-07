@@ -9,12 +9,20 @@ interface CameraTween {
   targetFrom: THREE.Vector3;
   targetTo: THREE.Vector3;
   onDone?: () => void;
+  onCancel?: () => void;
 }
 
 interface MapCameraRigOptions {
   aspect: number;
   domElement: HTMLElement;
   target: THREE.Vector3;
+}
+
+interface DemoCameraOptions {
+  durationMs: number;
+  radius: number;
+  height: number;
+  angle: number;
 }
 
 const PAN_BOUNDS = {
@@ -96,6 +104,7 @@ export class MapCameraRig {
   }
 
   startIntro(target: THREE.Vector3): Promise<void> {
+    this.cancelCameraTween();
     this.controls.enabled = false;
 
     return new Promise((resolve) => {
@@ -117,6 +126,7 @@ export class MapCameraRig {
   }
 
   resetView(target: THREE.Vector3): void {
+    this.cancelCameraTween();
     this.controls.enabled = false;
     this.cameraTween = {
       startedAt: performance.now(),
@@ -131,6 +141,47 @@ export class MapCameraRig {
         this.controls.enabled = true;
       }
     };
+  }
+
+  flyToDemoTarget(
+    target: THREE.Vector3,
+    options: DemoCameraOptions
+  ): Promise<boolean> {
+    this.cancelCameraTween();
+    this.controls.enabled = false;
+
+    return new Promise((resolve) => {
+      this.cameraTween = {
+        startedAt: performance.now(),
+        duration: options.durationMs,
+        from: this.camera.position.clone(),
+        to: this.getDemoCameraPosition(target, options),
+        targetFrom: this.controls.target.clone(),
+        targetTo: target,
+        onDone: () => {
+          this.controls.target.copy(target);
+          this.camera.lookAt(target);
+          resolve(true);
+        },
+        onCancel: () => resolve(false)
+      };
+    });
+  }
+
+  setDemoOrbitFrame(
+    target: THREE.Vector3,
+    options: Omit<DemoCameraOptions, "durationMs">
+  ): void {
+    this.controls.enabled = false;
+    this.cameraTween = null;
+    this.camera.position.copy(this.getDemoCameraPosition(target, options));
+    this.controls.target.copy(target);
+    this.camera.lookAt(target);
+  }
+
+  cancelDemoMotion(): void {
+    this.cancelCameraTween();
+    this.controls.enabled = false;
   }
 
   update(): void {
@@ -159,6 +210,28 @@ export class MapCameraRig {
 
   private getFinalCameraPosition(target: THREE.Vector3): THREE.Vector3 {
     return target.clone().add(CAMERA_VIEW.finalOffset);
+  }
+
+  private getDemoCameraPosition(
+    target: THREE.Vector3,
+    options: Omit<DemoCameraOptions, "durationMs">
+  ): THREE.Vector3 {
+    return new THREE.Vector3(
+      target.x + Math.cos(options.angle) * options.radius,
+      target.y + options.height,
+      target.z + Math.sin(options.angle) * options.radius
+    );
+  }
+
+  private cancelCameraTween(): void {
+    const tween = this.cameraTween;
+
+    if (!tween) {
+      return;
+    }
+
+    this.cameraTween = null;
+    tween.onCancel?.();
   }
 
   private updateCameraTween(): void {
