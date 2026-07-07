@@ -25,7 +25,7 @@ describe("getMarkerZoomStyle", () => {
     expect(style.worldScaleMultiplier).toBe(1);
   });
 
-  it("uses the softer default footprint at the closest zoom", () => {
+  it("keeps markers readable at the closest zoom", () => {
     const style = getMarkerZoomStyle({
       baseScale: BASE_SCALE,
       distance: MIN_DISTANCE,
@@ -35,7 +35,9 @@ describe("getMarkerZoomStyle", () => {
     const defaultProjectedScale = BASE_SCALE / REFERENCE_DISTANCE;
     const minProjectedScale = style.groupScale / MIN_DISTANCE;
 
-    expect(minProjectedScale / defaultProjectedScale).toBeCloseTo(0.82);
+    expect(minProjectedScale / defaultProjectedScale).toBeCloseTo(
+      MARKER_AND_LINK_ZOOM_SCALE.minProjectedScaleRatio
+    );
     expect(style.effectOpacityMultiplier).toBeCloseTo(0.82);
   });
 
