@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  base: "/3drimu/",
   server: {
     host: "127.0.0.1",
     port: 5173,
@@ -11,6 +12,6 @@ export default defineConfig({
     port: 4173
   },
   build: {
-    sourcemap: true
+    sourcemap: false
   }
 });
