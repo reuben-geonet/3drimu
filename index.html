@@ -8,6 +8,93 @@
       content="3D RIMU map showing live GeoNet site health markers."
     />
     <title>RIMU 3D Map</title>
+    <style>
+      :root {
+        background: #05070a;
+        color: #f5f7fb;
+      }
+
+      body {
+        margin: 0;
+        background: #05070a;
+      }
+
+      .hud {
+        display: none;
+      }
+
+      .loading-overlay {
+        position: fixed;
+        z-index: 10;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+        background: #05070a;
+        color: #f5f7fb;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+
+      .loading-overlay.is-hidden {
+        visibility: hidden;
+        opacity: 0;
+      }
+
+      .loader-shell {
+        font-size: 1rem;
+        font-weight: 650;
+        letter-spacing: 0.02em;
+      }
+
+      .loading-copy {
+        display: inline-flex;
+        align-items: baseline;
+        margin: 0;
+      }
+
+      .loading-dots {
+        display: inline-grid;
+        width: 1.05em;
+        grid-template-columns: repeat(3, 0.35em);
+        text-align: left;
+      }
+
+      .loading-dots span:nth-child(2) {
+        opacity: 0;
+        animation: loading-dot-two 1.2s steps(1, end) infinite;
+      }
+
+      .loading-dots span:nth-child(3) {
+        opacity: 0;
+        animation: loading-dot-three 1.2s steps(1, end) infinite;
+      }
+
+      @keyframes loading-dot-two {
+        0%,
+        33% {
+          opacity: 0;
+        }
+
+        34%,
+        100% {
+          opacity: 1;
+        }
+      }
+
+      @keyframes loading-dot-three {
+        0%,
+        66% {
+          opacity: 0;
+        }
+
+        67%,
+        100% {
+          opacity: 1;
+        }
+      }
+    </style>
   </head>
   <body>
     <main id="app">
@@ -75,6 +162,39 @@
             <span class="control-label">Refresh</span>
           </button>
           <button
+            id="auto-refresh"
+            class="control-button"
+            type="button"
+            data-testid="auto-refresh"
+            aria-label="Enable auto refresh"
+            aria-pressed="false"
+          >
+            <span class="control-icon" aria-hidden="true">
+              <svg
+                class="tabler-icon auto-refresh-icon"
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <g class="auto-refresh-arrows">
+                  <path d="M7.2 7.4a6.7 6.7 0 0 1 10.5 1.3" />
+                  <path d="M17.8 5.3v3.4h-3.4" />
+                  <path d="M16.8 16.6a6.7 6.7 0 0 1 -10.5 -1.3" />
+                  <path d="M6.2 18.7v-3.4h3.4" />
+                </g>
+                <path
+                  class="auto-refresh-pulse"
+                  d="M12 12m-1.35 0a1.35 1.35 0 1 0 2.7 0a1.35 1.35 0 1 0 -2.7 0"
+                />
+              </svg>
+            </span>
+            <span class="control-label">Auto Refresh</span>
+          </button>
+          <button
             id="toggle-links"
             class="control-button is-active"
             type="button"
@@ -103,6 +223,67 @@
             </span>
             <span class="control-label">Radio Links</span>
           </button>
+          <button
+            id="demo-mode"
+            class="control-button"
+            type="button"
+            data-testid="demo-mode"
+            aria-label="Start demo loop"
+            aria-pressed="false"
+          >
+            <span class="control-icon" aria-hidden="true">
+              <svg
+                class="tabler-icon demo-mode-icon"
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path class="demo-play" d="M10 8.2l5.8 3.8l-5.8 3.8z" />
+                <path class="demo-pause demo-pause-a" d="M9.4 8.3v7.4" />
+                <path class="demo-pause demo-pause-b" d="M14.6 8.3v7.4" />
+              </svg>
+            </span>
+            <span class="control-label">Demo Loop</span>
+          </button>
+          <button
+            id="fullscreen-toggle"
+            class="control-button"
+            type="button"
+            data-testid="fullscreen-toggle"
+            aria-label="Enter fullscreen"
+            aria-pressed="false"
+          >
+            <span class="control-icon" aria-hidden="true">
+              <svg
+                class="tabler-icon fullscreen-toggle-icon"
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <g class="fullscreen-expand">
+                  <path d="M4 9v-3a2 2 0 0 1 2 -2h3" />
+                  <path d="M20 9v-3a2 2 0 0 0 -2 -2h-3" />
+                  <path d="M4 15v3a2 2 0 0 0 2 2h3" />
+                  <path d="M20 15v3a2 2 0 0 1 -2 2h-3" />
+                </g>
+                <g class="fullscreen-compress">
+                  <path d="M9 4v3a2 2 0 0 1 -2 2h-3" />
+                  <path d="M15 4v3a2 2 0 0 0 2 2h3" />
+                  <path d="M9 20v-3a2 2 0 0 0 -2 -2h-3" />
+                  <path d="M15 20v-3a2 2 0 0 1 2 -2h3" />
+                </g>
+              </svg>
+            </span>
+            <span class="control-label">Fullscreen</span>
+          </button>
         </div>
       </section>
 
@@ -119,16 +300,11 @@
         aria-label="Loading RIMU map"
       >
         <div class="loader-shell">
-          <div class="loader-orbit" aria-hidden="true">
-            <span></span>
-            <span></span>
-            <span></span>
-          </div>
-          <h2>RIMU Map Link</h2>
-          <p id="loading-copy">Loading extruded world geometry and live site health</p>
-          <div class="loading-meter" aria-hidden="true">
-            <span></span>
-          </div>
+          <p id="loading-copy" class="loading-copy" aria-label="Loading">
+            Loading<span class="loading-dots" aria-hidden="true"
+              ><span>.</span><span>.</span><span>.</span></span
+            >
+          </p>
         </div>
       </section>
     </main>

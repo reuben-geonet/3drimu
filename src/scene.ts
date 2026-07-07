@@ -10,6 +10,8 @@ import type {
 } from "geojson";
 import type { GeometryCollection, Topology } from "topojson-specification";
 import { MapCameraRig } from "./cameraRig";
+import { buildDemoRoute, formatMetricLabel } from "./demo";
+import { DEMO_ANIMATION, DEMO_CARD } from "./demoConfig";
 import { RIMU_STATUSES, STATUS_COLORS, STATUS_LABELS } from "./status";
 import type { LinkArc, RimuStatus, SiteMarker } from "./types";
 
@@ -37,12 +39,40 @@ interface LinkPacketVisual {
   delay: number;
 }
 
+export interface DemoModeState {
+  active: boolean;
+  routeSize: number;
+  currentSiteId: string | null;
+  currentSiteName: string | null;
+}
+
+interface DemoCardRow {
+  label: string;
+  value: string;
+  status?: RimuStatus;
+  checkable: boolean;
+}
+
+interface DemoCardVisual {
+  site: SiteMarker;
+  group: THREE.Group;
+  mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  material: THREE.MeshBasicMaterial;
+  texture: THREE.CanvasTexture;
+  canvas: HTMLCanvasElement;
+  context: CanvasRenderingContext2D;
+  rows: DemoCardRow[];
+  createdAt: number;
+  fadeStartedAt: number | null;
+}
+
 interface MapSceneOptions {
   onMarkerHover?: (
     site: SiteMarker | null,
     point?: { x: number; y: number }
   ) => void;
   onMarkerClick?: (site: SiteMarker) => void;
+  onDemoStateChange?: (state: DemoModeState) => void;
 }
 
 interface CountryProperties {
@@ -86,8 +116,10 @@ export class MapScene {
   private readonly gridGroup = new THREE.Group();
   private readonly linkGroup = new THREE.Group();
   private readonly markerGroup = new THREE.Group();
+  private readonly demoCardGroup = new THREE.Group();
   private readonly markers: MarkerVisual[] = [];
   private readonly links: LinkVisual[] = [];
+  private readonly demoCards: DemoCardVisual[] = [];
   private readonly pickables: THREE.Object3D[] = [];
   private readonly visibleStatuses = new Set<RimuStatus>(RIMU_STATUSES);
   private readonly raycaster = new THREE.Raycaster();
@@ -95,6 +127,7 @@ export class MapScene {
   private readonly startedAt = performance.now();
   private readonly onMarkerHover?: MapSceneOptions["onMarkerHover"];
   private readonly onMarkerClick?: MapSceneOptions["onMarkerClick"];
+  private readonly onDemoStateChange?: MapSceneOptions["onDemoStateChange"];
   private readonly landMaterial = new THREE.MeshStandardMaterial({
     roughness: 0.74,
     metalness: 0.05
@@ -128,11 +161,19 @@ export class MapScene {
   private disposed = false;
   private pointerDownPoint: { x: number; y: number } | null = null;
   private pointerMovedAfterDown = false;
+  private demoActive = false;
+  private demoGeneration = 0;
+  private demoRoute: SiteMarker[] = [];
+  private demoRouteIndex = 0;
+  private demoLastSiteId: string | null = null;
+  private demoCurrentSite: SiteMarker | null = null;
+  private activeDemoCard: DemoCardVisual | null = null;
 
   constructor(container: HTMLElement, options: MapSceneOptions = {}) {
     this.container = container;
     this.onMarkerHover = options.onMarkerHover;
     this.onMarkerClick = options.onMarkerClick;
+    this.onDemoStateChange = options.onDemoStateChange;
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
       alpha: true,
@@ -157,7 +198,7 @@ export class MapScene {
     this.mapGroup.add(this.createOceanSurface());
     this.mapGroup.add(this.gridGroup, this.countryGroup, this.borderGroup);
     this.scene.add(this.mapGroup);
-    this.scene.add(this.linkGroup, this.markerGroup);
+    this.scene.add(this.linkGroup, this.markerGroup, this.demoCardGroup);
     this.scene.add(this.createStars());
     this.createGrid();
     this.createCountries();
@@ -183,6 +224,10 @@ export class MapScene {
     this.clearLinks();
     this.addLinks(links);
     this.renderVisibleMarkers();
+
+    if (this.demoActive) {
+      this.restartDemoLoop();
+    }
   }
 
   setLinksVisible(visible: boolean): void {
@@ -214,10 +259,36 @@ export class MapScene {
 
     this.clearHover();
     this.renderVisibleMarkers();
+
+    if (this.demoActive) {
+      this.restartDemoLoop();
+    }
   }
 
   getVisibleSiteCount(): number {
     return this.getVisibleSites().length;
+  }
+
+  setDemoMode(active: boolean): void {
+    if (active === this.demoActive) {
+      return;
+    }
+
+    if (active) {
+      this.startDemoMode();
+      return;
+    }
+
+    this.stopDemoMode(true);
+  }
+
+  getDemoModeState(): DemoModeState {
+    return {
+      active: this.demoActive,
+      routeSize: this.demoRoute.length,
+      currentSiteId: this.demoCurrentSite?.id ?? null,
+      currentSiteName: this.demoCurrentSite?.locality ?? null
+    };
   }
 
   startIntro(): Promise<void> {
@@ -225,11 +296,14 @@ export class MapScene {
   }
 
   resetView(): void {
+    this.stopDemoMode(false);
     this.cameraRig.resetView(this.getNzTarget());
   }
 
   dispose(): void {
     this.disposed = true;
+    this.stopDemoMode(false);
+    this.clearDemoCards();
     cancelAnimationFrame(this.animationFrame);
     window.removeEventListener("resize", this.onResize);
     this.renderer.domElement.removeEventListener("pointermove", this.onPointerMove);
@@ -238,6 +312,172 @@ export class MapScene {
     this.renderer.domElement.removeEventListener("pointerleave", this.clearHover);
     this.cameraRig.dispose();
     this.renderer.dispose();
+  }
+
+  private startDemoMode(): void {
+    this.demoActive = true;
+    this.demoGeneration++;
+    this.demoCurrentSite = null;
+    this.activeDemoCard = null;
+    this.clearHover();
+    this.rebuildDemoRoute();
+
+    if (this.demoRoute.length === 0) {
+      this.stopDemoMode(true);
+      return;
+    }
+
+    this.notifyDemoState();
+    void this.runDemoLoop(this.demoGeneration);
+  }
+
+  private stopDemoMode(resetCamera: boolean): void {
+    const wasActive = this.demoActive;
+
+    this.demoActive = false;
+    this.demoGeneration++;
+    this.demoRoute = [];
+    this.demoRouteIndex = 0;
+    this.demoCurrentSite = null;
+    this.activeDemoCard = null;
+    this.cameraRig.cancelDemoMotion();
+    this.fadeDemoCards(performance.now());
+
+    if (resetCamera) {
+      this.cameraRig.resetView(this.getNzTarget());
+    }
+
+    if (wasActive) {
+      this.notifyDemoState();
+    }
+  }
+
+  private restartDemoLoop(): void {
+    if (!this.demoActive) {
+      return;
+    }
+
+    this.demoGeneration++;
+    this.demoCurrentSite = null;
+    this.activeDemoCard = null;
+    this.cameraRig.cancelDemoMotion();
+    this.fadeDemoCards(performance.now());
+    this.rebuildDemoRoute();
+
+    if (this.demoRoute.length === 0) {
+      this.stopDemoMode(true);
+      return;
+    }
+
+    this.notifyDemoState();
+    void this.runDemoLoop(this.demoGeneration);
+  }
+
+  private async runDemoLoop(generation: number): Promise<void> {
+    while (this.isCurrentDemoGeneration(generation)) {
+      const site = this.getNextDemoSite();
+
+      if (!site) {
+        this.stopDemoMode(true);
+        return;
+      }
+
+      this.demoCurrentSite = site;
+      this.demoLastSiteId = site.id;
+      this.notifyDemoState();
+
+      const target = this.getDemoSiteTarget(site);
+      const frontAngle = this.getDemoStartAngle(target);
+      const startAngle =
+        frontAngle + DEMO_ANIMATION.motionStartAngleOffsetRadians;
+      const arrived = await this.cameraRig.flyToDemoTarget(target, {
+        durationMs: DEMO_ANIMATION.travelMs,
+        radius: DEMO_ANIMATION.orbitRadius,
+        height: DEMO_ANIMATION.orbitHeight,
+        angle: startAngle
+      });
+
+      if (!arrived || !this.isCurrentDemoGeneration(generation)) {
+        return;
+      }
+
+      this.activeDemoCard = this.createDemoCard(site, target);
+      await this.waitForDemoCardIntro(this.activeDemoCard, generation);
+
+      if (!this.isCurrentDemoGeneration(generation)) {
+        return;
+      }
+
+      const orbitStartedAt = performance.now();
+
+      while (
+        this.isCurrentDemoGeneration(generation) &&
+        performance.now() - orbitStartedAt < DEMO_ANIMATION.orbitMs
+      ) {
+        const orbitProgress = clamp01(
+          (performance.now() - orbitStartedAt) / DEMO_ANIMATION.orbitMs
+        );
+
+        this.cameraRig.setDemoOrbitFrame(target, {
+          radius: DEMO_ANIMATION.orbitRadius,
+          height: DEMO_ANIMATION.orbitHeight,
+          angle:
+            startAngle +
+            DEMO_ANIMATION.motionSweepRadians * easeInOutSine(orbitProgress)
+        });
+        await nextAnimationFrame();
+      }
+
+      await this.animateActiveDemoCardOut(generation);
+
+      if (!this.isCurrentDemoGeneration(generation)) {
+        return;
+      }
+
+      await delay(DEMO_ANIMATION.nextGapMs);
+    }
+  }
+
+  private rebuildDemoRoute(): void {
+    this.demoRoute = buildDemoRoute(this.getVisibleSites(), this.demoLastSiteId);
+    this.demoRouteIndex = 0;
+  }
+
+  private getNextDemoSite(): SiteMarker | null {
+    if (this.demoRoute.length === 0) {
+      return null;
+    }
+
+    if (this.demoRouteIndex >= this.demoRoute.length) {
+      this.rebuildDemoRoute();
+    }
+
+    const site = this.demoRoute[this.demoRouteIndex] ?? null;
+    this.demoRouteIndex++;
+
+    return site;
+  }
+
+  private getDemoSiteTarget(site: SiteMarker): THREE.Vector3 {
+    return this.projectLatLng(site.lat, site.lng, COUNTRY_DEPTH + 1.44);
+  }
+
+  private getDemoStartAngle(target: THREE.Vector3): number {
+    const offset = this.camera.position.clone().sub(target);
+
+    if (offset.lengthSq() < 0.001) {
+      return 0;
+    }
+
+    return Math.atan2(offset.z, offset.x);
+  }
+
+  private isCurrentDemoGeneration(generation: number): boolean {
+    return this.demoActive && this.demoGeneration === generation;
+  }
+
+  private notifyDemoState(): void {
+    this.onDemoStateChange?.(this.getDemoModeState());
   }
 
   private createOceanSurface(): THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial> {
@@ -478,6 +718,401 @@ export class MapScene {
     }
   }
 
+  private createDemoCard(
+    site: SiteMarker,
+    target: THREE.Vector3
+  ): DemoCardVisual | null {
+    const canvas = document.createElement("canvas");
+    canvas.width = DEMO_CARD.canvasWidth;
+    canvas.height = DEMO_CARD.canvasHeight;
+
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      return null;
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+
+    const material = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      depthWrite: false
+    });
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(DEMO_CARD.worldWidth, DEMO_CARD.worldHeight),
+      material
+    );
+    const group = new THREE.Group();
+
+    mesh.renderOrder = 12;
+    group.add(mesh);
+    group.position.copy(this.getDemoCardPosition(target));
+    group.lookAt(this.camera.position);
+    group.scale.setScalar(0.72);
+    this.demoCardGroup.add(group);
+
+    const card: DemoCardVisual = {
+      site,
+      group,
+      mesh,
+      material,
+      texture,
+      canvas,
+      context,
+      rows: this.getDemoCardRows(site),
+      createdAt: performance.now(),
+      fadeStartedAt: null
+    };
+
+    this.demoCards.push(card);
+    this.drawDemoCard(card, performance.now());
+    this.enforceDemoCardLimit(performance.now());
+
+    return card;
+  }
+
+  private getDemoCardPosition(target: THREE.Vector3): THREE.Vector3 {
+    const forward = this.camera.position.clone().sub(target);
+    forward.y = 0;
+
+    if (forward.lengthSq() < 0.001) {
+      forward.set(0, 0, 1);
+    }
+
+    forward.normalize();
+
+    const side = new THREE.Vector3(-forward.z, 0, forward.x).normalize();
+
+    return target
+      .clone()
+      .addScaledVector(side, DEMO_CARD.sideOffset)
+      .addScaledVector(forward, DEMO_CARD.forwardOffset)
+      .add(new THREE.Vector3(0, DEMO_CARD.verticalOffset, 0));
+  }
+
+  private getDemoCardRows(site: SiteMarker): DemoCardRow[] {
+    const rows: DemoCardRow[] = [
+      {
+        label: "Status",
+        value: STATUS_LABELS[site.status],
+        status: site.status,
+        checkable: true
+      }
+    ];
+
+    if (site.sitecode) {
+      rows.push({
+        label: "Site",
+        value: site.sitecode,
+        checkable: false
+      });
+    }
+
+    rows.push({
+      label: "Devices",
+      value: String(site.devices.length),
+      checkable: false
+    });
+
+    const fieldRows = Object.entries(site.fieldStatus).slice(0, 5);
+
+    if (fieldRows.length === 0) {
+      rows.push({
+        label: "Fields",
+        value: "No current fault fields",
+        status: "ok",
+        checkable: false
+      });
+    } else {
+      for (const [field, status] of fieldRows) {
+        rows.push({
+          label: formatMetricLabel(field),
+          value: STATUS_LABELS[status],
+          status,
+          checkable: true
+        });
+      }
+    }
+
+    if (site.tags.length > 0 && rows.length < 8) {
+      rows.push({
+        label: "Tags",
+        value: site.tags.slice(0, 4).join(", "),
+        checkable: false
+      });
+    }
+
+    return rows.slice(0, 8);
+  }
+
+  private updateDemoCards(now: number): void {
+    for (const card of [...this.demoCards]) {
+      if (card === this.activeDemoCard && card.fadeStartedAt === null) {
+        card.group.lookAt(this.camera.position);
+      }
+
+      this.drawDemoCard(card, now);
+
+      if (
+        card !== this.activeDemoCard &&
+        card.fadeStartedAt === null &&
+        now - card.createdAt > DEMO_ANIMATION.cardOutOfViewGraceMs &&
+        !this.isDemoCardInView(card)
+      ) {
+        card.fadeStartedAt = now;
+      }
+
+      if (
+        card.fadeStartedAt !== null &&
+        now - card.fadeStartedAt >= DEMO_ANIMATION.cardFadeMs
+      ) {
+        this.disposeDemoCard(card);
+      }
+    }
+
+    this.enforceDemoCardLimit(now);
+  }
+
+  private async animateActiveDemoCardOut(generation: number): Promise<void> {
+    const card = this.activeDemoCard;
+    this.activeDemoCard = null;
+
+    if (!card) {
+      return;
+    }
+
+    const fadeStartedAt = card.fadeStartedAt ?? performance.now();
+    card.fadeStartedAt = fadeStartedAt;
+
+    await delay(
+      Math.max(0, DEMO_ANIMATION.cardFadeMs - (performance.now() - fadeStartedAt))
+    );
+
+    if (!this.isCurrentDemoGeneration(generation)) {
+      return;
+    }
+
+    if (this.demoCards.includes(card)) {
+      this.disposeDemoCard(card);
+    }
+  }
+
+  private async waitForDemoCardIntro(
+    card: DemoCardVisual | null,
+    generation: number
+  ): Promise<void> {
+    if (!card) {
+      return;
+    }
+
+    const finalRowDelay = Math.max(0, card.rows.length - 1) *
+      DEMO_ANIMATION.cardRowStaggerMs;
+    const introDuration =
+      DEMO_ANIMATION.cardDrawMs +
+      finalRowDelay +
+      Math.max(DEMO_ANIMATION.cardCheckingMs, DEMO_ANIMATION.cardRowRevealMs);
+    const remaining = introDuration - (performance.now() - card.createdAt);
+
+    if (remaining > 0) {
+      await delay(remaining);
+    }
+
+    if (!this.isCurrentDemoGeneration(generation)) {
+      return;
+    }
+  }
+
+  private drawDemoCard(card: DemoCardVisual, now: number): void {
+    const { canvas, context } = card;
+    const width = canvas.width;
+    const height = canvas.height;
+    const age = now - card.createdAt;
+    const drawProgress = clamp01(age / DEMO_ANIMATION.cardDrawMs);
+    const drawEase = easeOutCubic(drawProgress);
+    const fadeProgress = card.fadeStartedAt !== null
+      ? clamp01((now - card.fadeStartedAt) / DEMO_ANIMATION.cardFadeMs)
+      : 0;
+    const fadeOpacity = 1 - fadeProgress;
+    const flash =
+      card.site.status === "ok" ? 0 : (Math.sin(now / 130) + 1) / 2;
+    const opacity =
+      fadeOpacity * (0.18 + drawEase * 0.82) * (0.86 + flash * 0.14);
+    const scale =
+      fadeOpacity *
+      (0.72 + easeOutBack(drawProgress) * 0.28) *
+      this.getDemoCardViewportScale();
+    const accent = STATUS_COLORS[card.site.status];
+
+    card.material.opacity = opacity;
+    card.group.scale.setScalar(scale);
+
+    context.clearRect(0, 0, width, height);
+    context.save();
+    context.beginPath();
+    context.rect(0, 0, width * drawEase, height);
+    context.clip();
+
+    fillRoundRect(
+      context,
+      28,
+      28,
+      width - 56,
+      height - 56,
+      34,
+      "rgba(4, 10, 14, 0.88)"
+    );
+    fillRoundRect(
+      context,
+      46,
+      46,
+      width - 92,
+      96,
+      26,
+      hexToRgba(accent, card.site.status === "ok" ? 0.28 : 0.4 + flash * 0.18)
+    );
+    strokeRoundRect(
+      context,
+      28,
+      28,
+      width - 56,
+      height - 56,
+      34,
+      hexToRgba(accent, 0.72 + flash * 0.28),
+      6
+    );
+
+    const headerContentX = 70;
+    const headerContentRight = width - 70;
+    const headerGap = 28;
+    const statusLabel = STATUS_LABELS[card.site.status];
+    const statusPillWidth = measureStatusPillWidth(context, statusLabel);
+    const statusPillX = headerContentRight - statusPillWidth;
+    const titleMaxWidth = Math.max(
+      0,
+      statusPillX - headerGap - headerContentX
+    );
+
+    context.textBaseline = "middle";
+    context.fillStyle = "#f5f7fb";
+    drawResizedText(context, card.site.locality, 70, 94, titleMaxWidth, {
+      weight: 700,
+      maxSize: 58,
+      minSize: 30
+    });
+
+    drawStatusPill(context, statusLabel, accent, statusPillX, 66);
+    context.textBaseline = "alphabetic";
+
+    const rowsStartY = 190;
+    const rowHeight = 51;
+
+    for (let index = 0; index < card.rows.length; index++) {
+      const row = card.rows[index];
+      const rowAge =
+        age -
+        DEMO_ANIMATION.cardDrawMs -
+        index * DEMO_ANIMATION.cardRowStaggerMs;
+      const rowProgress = clamp01(rowAge / DEMO_ANIMATION.cardRowRevealMs);
+
+      if (rowProgress <= 0) {
+        continue;
+      }
+
+      const y = rowsStartY + index * rowHeight;
+      const settled = rowAge >= DEMO_ANIMATION.cardCheckingMs;
+      const rowAccent = row.status ? STATUS_COLORS[row.status] : "#f5f7fb";
+      const value = row.checkable && !settled ? "Checking..." : row.value;
+
+      context.globalAlpha = rowProgress;
+      fillRoundRect(
+        context,
+        64,
+        y - 28,
+        width - 128,
+        39,
+        15,
+        hexToRgba(rowAccent, row.status ? 0.14 : 0.07)
+      );
+      context.font = "700 22px Inter, sans-serif";
+      context.fillStyle = "#aeb8c7";
+      drawFittedText(context, row.label, 90, y - 1, 310);
+
+      context.font = "700 25px Inter, sans-serif";
+      context.fillStyle = row.status && settled ? rowAccent : "#f5f7fb";
+      drawFittedText(context, value, 430, y - 1, width - 530);
+      context.globalAlpha = 1;
+    }
+
+    context.restore();
+    card.texture.needsUpdate = true;
+  }
+
+  private enforceDemoCardLimit(now: number): void {
+    const retainedCards = this.demoCards.filter(
+      (card) => card.fadeStartedAt === null
+    );
+    const extraCount = retainedCards.length - DEMO_ANIMATION.maxRetainedCards;
+
+    if (extraCount <= 0) {
+      return;
+    }
+
+    for (const card of retainedCards.slice(0, extraCount)) {
+      card.fadeStartedAt = now;
+    }
+  }
+
+  private fadeDemoCards(now: number): void {
+    for (const card of this.demoCards) {
+      card.fadeStartedAt ??= now;
+    }
+  }
+
+  private clearDemoCards(): void {
+    for (const card of [...this.demoCards]) {
+      this.disposeDemoCard(card);
+    }
+  }
+
+  private disposeDemoCard(card: DemoCardVisual): void {
+    const index = this.demoCards.indexOf(card);
+
+    if (index >= 0) {
+      this.demoCards.splice(index, 1);
+    }
+
+    if (this.activeDemoCard === card) {
+      this.activeDemoCard = null;
+    }
+
+    card.texture.dispose();
+    card.group.traverse((object) => this.disposeObjectResources(object));
+    this.demoCardGroup.remove(card.group);
+  }
+
+  private isDemoCardInView(card: DemoCardVisual): boolean {
+    const projected = card.group.position.clone().project(this.camera);
+
+    return (
+      projected.z >= -1 &&
+      projected.z <= 1 &&
+      Math.abs(projected.x) <= 1.14 &&
+      Math.abs(projected.y) <= 1.14
+    );
+  }
+
+  private getDemoCardViewportScale(): number {
+    if (this.camera.aspect >= 1) {
+      return 1;
+    }
+
+    return THREE.MathUtils.clamp(this.camera.aspect * 0.84, 0.34, 1);
+  }
+
   private disposeObjectResources(object: THREE.Object3D): void {
     const renderable = object as THREE.Object3D & {
       geometry?: { dispose: () => void };
@@ -572,6 +1207,7 @@ export class MapScene {
     const elapsed = (performance.now() - this.startedAt) / 1000;
     this.updateMarkers(elapsed);
     this.updateLinks(elapsed);
+    this.updateDemoCards(performance.now());
     this.cameraRig.update();
     this.renderer.render(this.scene, this.camera);
     this.animationFrame = requestAnimationFrame(this.animate);
@@ -592,18 +1228,19 @@ export class MapScene {
   }
 
   private updateLinks(elapsed: number): void {
-    const delta = Math.min(0.05, Math.max(0, elapsed - this.previousLinkElapsed));
+    const delta = Math.min(0.18, Math.max(0, elapsed - this.previousLinkElapsed));
     this.previousLinkElapsed = elapsed;
 
     for (const link of this.links) {
       let hasActivePackets = false;
+      const speed = this.linksVisible ? link.speed : link.speed * 1.3;
 
       for (let index = 0; index < link.packets.length; index++) {
         const packet = link.packets[index];
         const wasSent = packet.progress >= 0;
 
         if (this.linksVisible || wasSent) {
-          packet.progress += delta * link.speed;
+          packet.progress += delta * speed;
         }
 
         if (this.linksVisible) {
@@ -677,6 +1314,11 @@ export class MapScene {
   };
 
   private onPointerMove = (event: PointerEvent): void => {
+    if (this.demoActive) {
+      this.clearHover();
+      return;
+    }
+
     this.updatePointerMoved(event.clientX, event.clientY);
     const site = this.getSiteAtPoint(event.clientX, event.clientY);
 
@@ -695,6 +1337,10 @@ export class MapScene {
   };
 
   private onClick = (event: MouseEvent): void => {
+    if (this.demoActive) {
+      return;
+    }
+
     if (this.pointerMovedAfterDown) {
       return;
     }
@@ -735,6 +1381,162 @@ export class MapScene {
 
     return site ?? null;
   }
+}
+
+function nextAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function clamp01(value: number): number {
+  return THREE.MathUtils.clamp(value, 0, 1);
+}
+
+function easeOutCubic(value: number): number {
+  return 1 - Math.pow(1 - value, 3);
+}
+
+function easeOutBack(value: number): number {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+
+  return 1 + c3 * Math.pow(value - 1, 3) + c1 * Math.pow(value - 1, 2);
+}
+
+function easeInOutSine(value: number): number {
+  return -(Math.cos(Math.PI * value) - 1) / 2;
+}
+
+function fillRoundRect(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+  fillStyle: string
+): void {
+  context.fillStyle = fillStyle;
+  createRoundRectPath(context, x, y, width, height, radius);
+  context.fill();
+}
+
+function strokeRoundRect(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+  strokeStyle: string,
+  lineWidth: number
+): void {
+  context.strokeStyle = strokeStyle;
+  context.lineWidth = lineWidth;
+  createRoundRectPath(context, x, y, width, height, radius);
+  context.stroke();
+}
+
+function createRoundRectPath(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number
+): void {
+  const r = Math.min(radius, width / 2, height / 2);
+
+  context.beginPath();
+  context.moveTo(x + r, y);
+  context.lineTo(x + width - r, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + r);
+  context.lineTo(x + width, y + height - r);
+  context.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  context.lineTo(x + r, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - r);
+  context.lineTo(x, y + r);
+  context.quadraticCurveTo(x, y, x + r, y);
+  context.closePath();
+}
+
+function drawFittedText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number
+): void {
+  if (context.measureText(text).width <= maxWidth) {
+    context.fillText(text, x, y);
+    return;
+  }
+
+  let fitted = text;
+
+  while (fitted.length > 3 && context.measureText(`${fitted}...`).width > maxWidth) {
+    fitted = fitted.slice(0, -1);
+  }
+
+  context.fillText(`${fitted}...`, x, y);
+}
+
+function drawResizedText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  options: { weight: number; maxSize: number; minSize: number }
+): void {
+  for (let size = options.maxSize; size >= options.minSize; size -= 1) {
+    context.font = `${options.weight} ${size}px Inter, sans-serif`;
+
+    if (context.measureText(text).width <= maxWidth) {
+      context.fillText(text, x, y);
+      return;
+    }
+  }
+
+  context.font = `${options.weight} ${options.minSize}px Inter, sans-serif`;
+  drawFittedText(context, text, x, y, maxWidth);
+}
+
+function measureStatusPillWidth(
+  context: CanvasRenderingContext2D,
+  label: string
+): number {
+  context.font = "800 25px Inter, sans-serif";
+  return Math.ceil(context.measureText(label.toUpperCase()).width + 48);
+}
+
+function drawStatusPill(
+  context: CanvasRenderingContext2D,
+  label: string,
+  color: string,
+  x: number,
+  y: number
+): void {
+  const width = measureStatusPillWidth(context, label);
+
+  fillRoundRect(context, x, y, width, 56, 22, hexToRgba(color, 0.22));
+  strokeRoundRect(context, x, y, width, 56, 22, hexToRgba(color, 0.86), 3);
+  context.textBaseline = "middle";
+  context.font = "800 25px Inter, sans-serif";
+  context.fillStyle = color;
+  context.fillText(label.toUpperCase(), x + 24, y + 28);
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+  const normalized = hex.replace("#", "");
+  const red = Number.parseInt(normalized.slice(0, 2), 16);
+  const green = Number.parseInt(normalized.slice(2, 4), 16);
+  const blue = Number.parseInt(normalized.slice(4, 6), 16);
+
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 }
 
 function getCountries(): FeatureCollection<Geometry, CountryProperties> {
