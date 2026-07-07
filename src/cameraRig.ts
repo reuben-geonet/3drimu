@@ -42,7 +42,7 @@ const CAMERA_VIEW = {
 
   // User zoom bounds after the intro. maxDistance is intentionally tight so the
   // map edge and empty background cannot be revealed by zooming out.
-  minDistance: 18,
+  minDistance: 4.5,
   maxDistance: 46,
 
   introDurationMs: 2600,
