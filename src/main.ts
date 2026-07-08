@@ -9,6 +9,7 @@ import {
 } from "./tagFilters";
 import { ThemeController } from "./theme";
 import type { RimuStatus, SiteMarker } from "./types";
+import { WakeLockController } from "./wakeLock";
 
 const MIN_LOADING_MS = 2400;
 const CONTROL_ANIMATION_MS = 620;
@@ -62,10 +63,14 @@ const fullscreenToggle = requiredElement<HTMLButtonElement>("fullscreen-toggle")
 const initialBrowserConfig = getInitialBrowserConfig();
 
 const theme = new ThemeController(themeToggle);
+const wakeLockController = new WakeLockController();
 const map = new MapScene(sceneRoot, {
   onMarkerHover: renderTooltip,
   onMarkerClick: openRimuChart,
-  onDemoStateChange: syncDemoToggle
+  onDemoStateChange: (state) => {
+    syncDemoToggle(state);
+    wakeLockController.setActive(state.active);
+  }
 });
 const visibleStatuses = new Set<RimuStatus>(RIMU_STATUSES);
 let selectedTag: string | null = initialBrowserConfig.tag ?? null;
