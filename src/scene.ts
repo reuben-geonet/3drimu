@@ -140,6 +140,7 @@ export class MapScene {
     DEMO_ACTIVE_MARKER.haloColor
   );
   private readonly visibleStatuses = new Set<RimuStatus>(RIMU_STATUSES);
+  private visibleTag: string | null = null;
   private readonly startedAt = performance.now();
   private readonly onMarkerHover?: MapSceneOptions["onMarkerHover"];
   private readonly onMarkerClick?: MapSceneOptions["onMarkerClick"];
@@ -276,6 +277,20 @@ export class MapScene {
       this.visibleStatuses.add(status);
     }
 
+    this.clearHover();
+    this.renderVisibleMarkers();
+
+    if (this.demoActive) {
+      this.restartDemoLoop();
+    }
+  }
+
+  setVisibleTag(tag: string | null): void {
+    if (this.visibleTag === tag) {
+      return;
+    }
+
+    this.visibleTag = tag;
     this.clearHover();
     this.renderVisibleMarkers();
 
@@ -783,7 +798,11 @@ export class MapScene {
   }
 
   private getVisibleSites(): SiteMarker[] {
-    return this.sites.filter((site) => this.visibleStatuses.has(site.status));
+    return this.sites.filter(
+      (site) =>
+        this.visibleStatuses.has(site.status) &&
+        (this.visibleTag === null || site.tags.includes(this.visibleTag))
+    );
   }
 
   private clearMarkers(): void {

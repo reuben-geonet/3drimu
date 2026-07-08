@@ -119,6 +119,7 @@ test("loads the close extruded map view and renders markers", async ({
   const siteCount = await page.evaluate(() => window.__RIMU_SITE_COUNT__);
   expect(siteCount).toBe(3);
   await expect(page.locator("#legend .legend-button")).toHaveCount(6);
+  await expect(page.getByTestId("tag-filter")).toBeVisible();
 
   const nonBlankCanvas = await page.locator("canvas").evaluate((element) => {
     const canvas = element as HTMLCanvasElement;
@@ -401,6 +402,85 @@ test("toggles marker statuses from the top-left legend", async ({ page }) => {
     .toBeNull();
 });
 
+test("filters sites by a single selected tag and combines with statuses", async ({
+  page
+}) => {
+  await page.goto("/");
+  await page.waitForFunction(() => window.__RIMU_MAP_READY__ === true);
+
+  const tagInput = page.getByTestId("tag-filter-input");
+
+  await tagInput.click();
+  await expect(page.getByRole("option", { name: /^All tags 3$/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /^gnss 2$/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /^mains12 2$/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /^building 1$/ })).toBeVisible();
+
+  await selectTag(page, "gn", /^gnss 2$/);
+
+  await expect(tagInput).toHaveValue("gnss");
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_SELECTED_TAG__))
+    .toBe("gnss");
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_VISIBLE_SITE_COUNT__))
+    .toBe(2);
+  await expect
+    .poll(() => getSearchParam(page, "tag"))
+    .toBe("gnss");
+
+  await page.locator('#legend .legend-button[data-status="bad"]').click();
+
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_VISIBLE_SITE_COUNT__))
+    .toBe(1);
+
+  await page.getByTestId("tag-filter-clear").click();
+
+  await expect(tagInput).toHaveValue("");
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_SELECTED_TAG__))
+    .toBeNull();
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_VISIBLE_SITE_COUNT__))
+    .toBe(2);
+  await expect
+    .poll(() => getSearchParam(page, "tag"))
+    .toBeNull();
+});
+
+test("loads status and tag filters from query parameters", async ({ page }) => {
+  await page.goto("/?filters=ok,warning&tag=gnss");
+  await page.waitForFunction(() => window.__RIMU_MAP_READY__ === true);
+
+  await expect(page.getByTestId("tag-filter-input")).toHaveValue("gnss");
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_SELECTED_TAG__))
+    .toBe("gnss");
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_VISIBLE_SITE_COUNT__))
+    .toBe(1);
+  await expect(
+    page.locator('#legend .legend-button[data-status="bad"]')
+  ).toHaveAttribute("aria-pressed", "false");
+});
+
+test("clears unknown tag query parameters after data loads", async ({ page }) => {
+  await page.goto("/?tag=missing");
+  await page.waitForFunction(() => window.__RIMU_MAP_READY__ === true);
+
+  await expect(page.getByTestId("tag-filter-input")).toHaveValue("");
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_SELECTED_TAG__))
+    .toBeNull();
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_VISIBLE_SITE_COUNT__))
+    .toBe(3);
+  await expect
+    .poll(() => getSearchParam(page, "tag"))
+    .toBeNull();
+});
+
 test("toggles and persists light mode", async ({ page }) => {
   await page.goto("/");
   await page.waitForFunction(() => window.__RIMU_MAP_READY__ === true);
@@ -430,6 +510,18 @@ async function mockRimuApi(page: Page): Promise<void> {
       body: JSON.stringify(faultsFixture)
     })
   );
+}
+
+async function selectTag(
+  page: Page,
+  query: string,
+  optionName: RegExp
+): Promise<void> {
+  const input = page.getByTestId("tag-filter-input");
+
+  await input.click();
+  await input.fill(query);
+  await page.getByRole("option", { name: optionName }).click();
 }
 
 async function getSearchParam(

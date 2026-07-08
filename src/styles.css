@@ -97,6 +97,14 @@ button:focus-visible {
   align-items: flex-start;
 }
 
+.filter-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.42rem;
+  max-width: min(42rem, 100%);
+}
+
 .legend {
   border: 0;
   background: transparent;
@@ -501,6 +509,140 @@ p {
   opacity: 0.62;
 }
 
+.tag-filter {
+  position: relative;
+  width: min(19rem, 100%);
+}
+
+.tag-filter-label {
+  display: block;
+  margin: 0 0 0.22rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.tag-filter-control {
+  display: flex;
+  align-items: center;
+  gap: 0.34rem;
+}
+
+.tag-filter-input {
+  min-width: 0;
+  width: 100%;
+  height: 2rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: 6px;
+  padding: 0.38rem 0.54rem;
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 650;
+  line-height: 1;
+  outline: none;
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.tag-filter-input::placeholder {
+  color: color-mix(in srgb, var(--muted) 82%, transparent);
+}
+
+.tag-filter-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  box-shadow: 0 0.55rem 1.4rem color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.tag-filter-clear {
+  flex: 0 0 auto;
+  height: 2rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: 6px;
+  padding: 0 0.58rem;
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel));
+  color: var(--text);
+  font-size: 0.74rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    color 180ms ease,
+    opacity 180ms ease;
+}
+
+.tag-filter-clear:hover,
+.tag-filter-clear:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+}
+
+.tag-filter-clear:disabled {
+  cursor: default;
+  opacity: 0.54;
+}
+
+.tag-filter-list {
+  position: absolute;
+  z-index: 6;
+  top: calc(100% + 0.32rem);
+  left: 0;
+  width: min(20rem, calc(100vw - 2rem));
+  max-height: min(18rem, 52vh);
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--panel-border) 86%, transparent);
+  border-radius: 8px;
+  padding: 0.26rem;
+  background: color-mix(in srgb, var(--panel) 96%, #020407);
+  box-shadow: 0 1rem 2.4rem var(--shadow);
+  backdrop-filter: blur(18px);
+}
+
+.tag-filter-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border: 0;
+  border-radius: 6px;
+  padding: 0.44rem 0.52rem;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 650;
+  line-height: 1.1;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tag-filter-option:hover,
+.tag-filter-option:focus-visible,
+.tag-filter-option.is-active {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.tag-filter-option-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.tag-filter-empty {
+  padding: 0.5rem 0.56rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
 :root[data-theme="light"] .control-button {
   color: color-mix(in srgb, var(--control-accent) 54%, var(--text));
 }
@@ -525,6 +667,16 @@ p {
 :root[data-theme="light"] .legend-button.is-active {
   border-color: color-mix(in srgb, var(--status-color) 60%, transparent);
   background: color-mix(in srgb, var(--status-color) 28%, rgba(255, 255, 255, 0.9));
+}
+
+:root[data-theme="light"] .tag-filter-input,
+:root[data-theme="light"] .tag-filter-clear {
+  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+  background: color-mix(in srgb, var(--accent) 13%, rgba(255, 255, 255, 0.84));
+}
+
+:root[data-theme="light"] .tag-filter-list {
+  background: rgba(247, 250, 253, 0.96);
 }
 
 .tooltip {
@@ -792,6 +944,11 @@ p {
     align-items: flex-start;
   }
 
+  .filter-stack {
+    width: 100%;
+    max-width: none;
+  }
+
   .legend {
     width: 100%;
     max-width: none;
@@ -801,5 +958,13 @@ p {
     min-height: 1.9rem;
     padding: 0.34rem 0.45rem;
     font-size: 0.74rem;
+  }
+
+  .tag-filter {
+    width: min(19rem, 100%);
+  }
+
+  .tag-filter-list {
+    width: 100%;
   }
 }

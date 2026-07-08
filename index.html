@@ -287,8 +287,45 @@
         </div>
       </section>
 
-      <section class="hud hud-status" aria-label="RIMU status filters">
-        <div id="legend" class="legend"></div>
+      <section class="hud hud-status" aria-label="RIMU filters">
+        <div class="filter-stack">
+          <div id="legend" class="legend"></div>
+          <div id="tag-filter" class="tag-filter" data-testid="tag-filter">
+            <label class="tag-filter-label" for="tag-filter-input">Tag</label>
+            <div class="tag-filter-control">
+              <input
+                id="tag-filter-input"
+                class="tag-filter-input"
+                data-testid="tag-filter-input"
+                type="search"
+                autocomplete="off"
+                spellcheck="false"
+                role="combobox"
+                aria-autocomplete="list"
+                aria-controls="tag-filter-list"
+                aria-expanded="false"
+                placeholder="All tags"
+              />
+              <button
+                id="tag-filter-clear"
+                class="tag-filter-clear"
+                data-testid="tag-filter-clear"
+                type="button"
+                aria-label="Clear tag filter"
+                disabled
+              >
+                Clear
+              </button>
+            </div>
+            <div
+              id="tag-filter-list"
+              class="tag-filter-list"
+              role="listbox"
+              aria-label="Site tag options"
+              hidden
+            ></div>
+          </div>
+        </div>
       </section>
 
       <div id="tooltip" class="tooltip" role="status" aria-live="polite"></div>

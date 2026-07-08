@@ -2,6 +2,11 @@ import "./styles.css";
 import { getRimuChartUrl, loadRimuMapData } from "./api";
 import { MapScene, renderLegend, type DemoModeState } from "./scene";
 import { RIMU_STATUSES, STATUS_LABELS } from "./status";
+import {
+  buildSiteTagOptions,
+  filterSiteTagOptions,
+  type SiteTagOption
+} from "./tagFilters";
 import { ThemeController } from "./theme";
 import type { RimuStatus, SiteMarker } from "./types";
 
@@ -17,6 +22,7 @@ interface InitialBrowserConfig {
   demoMode?: boolean;
   radioLink?: boolean;
   filters?: Set<RimuStatus>;
+  tag?: string;
 }
 
 declare global {
@@ -33,12 +39,18 @@ declare global {
     __RIMU_DEMO_CURRENT_SITE__?: string | null;
     __RIMU_FULLSCREEN_ACTIVE__?: boolean;
     __RIMU_LAST_LOAD_SOURCE__?: "live" | "fallback";
+    __RIMU_SELECTED_TAG__?: string | null;
+    __RIMU_TAG_OPTION_COUNT__?: number;
   }
 }
 
 const sceneRoot = requiredElement("scene-root");
 const loadingOverlay = requiredElement("loading-overlay");
 const legend = requiredElement("legend");
+const tagFilter = requiredElement("tag-filter");
+const tagFilterInput = requiredElement<HTMLInputElement>("tag-filter-input");
+const tagFilterList = requiredElement("tag-filter-list");
+const tagFilterClear = requiredElement<HTMLButtonElement>("tag-filter-clear");
 const tooltip = requiredElement("tooltip");
 const themeToggle = requiredElement<HTMLButtonElement>("theme-toggle");
 const resetView = requiredElement<HTMLButtonElement>("reset-view");
@@ -56,6 +68,10 @@ const map = new MapScene(sceneRoot, {
   onDemoStateChange: syncDemoToggle
 });
 const visibleStatuses = new Set<RimuStatus>(RIMU_STATUSES);
+let selectedTag: string | null = initialBrowserConfig.tag ?? null;
+let tagOptions: SiteTagOption[] = [];
+let loadedSiteCount = 0;
+let tagFilterOpen = false;
 let autoRefreshActive = false;
 let autoRefreshTimer: number | undefined;
 let autoRefreshCountdownTimer: number | undefined;
@@ -65,12 +81,20 @@ let refreshInFlight: Promise<void> | undefined;
 theme.onChange((nextTheme) => map.setTheme(nextTheme));
 map.setTheme(theme.theme);
 applyInitialFilterConfig(initialBrowserConfig);
+map.setVisibleTag(selectedTag);
 renderLegend(legend, visibleStatuses);
+renderTagFilter();
 syncLinkToggle();
 syncAutoRefreshToggle();
 syncDemoToggle();
 syncFullscreenToggle();
 legend.addEventListener("click", onLegendClick);
+tagFilterInput.addEventListener("focus", openTagFilterList);
+tagFilterInput.addEventListener("input", onTagFilterInput);
+tagFilterInput.addEventListener("keydown", onTagFilterKeyDown);
+tagFilterClear.addEventListener("click", onTagFilterClearClick);
+tagFilterList.addEventListener("click", onTagFilterListClick);
+tagFilter.addEventListener("focusout", onTagFilterFocusOut);
 themeToggle.addEventListener("click", () => {
   playButtonAnimation(themeToggle, "is-theme-shifting", CONTROL_ANIMATION_MS);
 });
@@ -85,6 +109,7 @@ demoMode.addEventListener("click", onDemoModeClick);
 fullscreenToggle.addEventListener("click", () => void onFullscreenToggleClick());
 document.addEventListener("fullscreenchange", syncFullscreenToggle);
 document.addEventListener("fullscreenerror", syncFullscreenToggle);
+document.addEventListener("pointerdown", onDocumentPointerDown);
 
 void boot();
 
@@ -95,6 +120,7 @@ async function boot(): Promise<void> {
   const remaining = Math.max(0, MIN_LOADING_MS - (performance.now() - startedAt));
 
   await delay(remaining);
+  updateTagOptions(data.sites);
   map.setData(data.sites, data.links);
   applyInitialLinkConfig(initialBrowserConfig);
   syncVisibleSiteCount();
@@ -128,9 +154,11 @@ async function refreshOnce(): Promise<void> {
 
   try {
     const data = await loadRimuMapData();
+    updateTagOptions(data.sites);
     map.setData(data.sites, data.links);
     syncVisibleSiteCount();
     syncLinkToggle();
+    syncBrowserUrlConfig();
     window.__RIMU_SITE_COUNT__ = data.sites.length;
     window.__RIMU_LAST_LOAD_SOURCE__ = data.loadedFromLiveApi ? "live" : "fallback";
   } finally {
@@ -189,6 +217,222 @@ function onLegendClick(event: MouseEvent): void {
   renderLegend(legend, visibleStatuses);
   syncVisibleSiteCount();
   syncBrowserUrlConfig();
+}
+
+function onTagFilterInput(): void {
+  if (selectedTag !== null && tagFilterInput.value !== selectedTag) {
+    setSelectedTag(null, { preserveInput: true });
+    return;
+  }
+
+  openTagFilterList();
+  renderTagFilter({ preserveInput: true });
+}
+
+function onTagFilterKeyDown(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    closeTagFilterList(true);
+    return;
+  }
+
+  if (event.key === "ArrowDown") {
+    openTagFilterList();
+    event.preventDefault();
+    return;
+  }
+
+  if (event.key !== "Enter") {
+    return;
+  }
+
+  event.preventDefault();
+
+  const query = tagFilterInput.value;
+
+  if (query.trim() === "") {
+    setSelectedTag(null);
+    closeTagFilterList(false);
+    return;
+  }
+
+  const [firstMatch] = filterSiteTagOptions(tagOptions, query);
+
+  if (firstMatch) {
+    setSelectedTag(firstMatch.tag);
+    closeTagFilterList(false);
+  }
+}
+
+function onTagFilterClearClick(): void {
+  setSelectedTag(null);
+  closeTagFilterList(false);
+}
+
+function onTagFilterListClick(event: MouseEvent): void {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+
+  const button = event.target.closest<HTMLButtonElement>(".tag-filter-option");
+
+  if (!button || !tagFilterList.contains(button)) {
+    return;
+  }
+
+  setSelectedTag(button.dataset.tagValue || null);
+  closeTagFilterList(false);
+}
+
+function onTagFilterFocusOut(): void {
+  window.setTimeout(() => {
+    const activeElement = document.activeElement;
+
+    if (!activeElement || !tagFilter.contains(activeElement)) {
+      closeTagFilterList(true);
+    }
+  }, 0);
+}
+
+function onDocumentPointerDown(event: PointerEvent): void {
+  if (event.target instanceof Node && tagFilter.contains(event.target)) {
+    return;
+  }
+
+  closeTagFilterList(true);
+}
+
+function updateTagOptions(sites: readonly SiteMarker[]): void {
+  loadedSiteCount = sites.length;
+  tagOptions = buildSiteTagOptions(sites);
+
+  if (selectedTag !== null && !hasTagOption(selectedTag)) {
+    selectedTag = null;
+    map.setVisibleTag(null);
+  }
+
+  renderTagFilter();
+}
+
+function hasTagOption(tag: string): boolean {
+  return tagOptions.some((option) => option.tag === tag);
+}
+
+function setSelectedTag(
+  tag: string | null,
+  options: { preserveInput?: boolean } = {}
+): void {
+  if (selectedTag !== tag) {
+    selectedTag = tag;
+    map.setVisibleTag(selectedTag);
+    syncVisibleSiteCount();
+    syncBrowserUrlConfig();
+  }
+
+  renderTagFilter({ preserveInput: options.preserveInput });
+}
+
+function openTagFilterList(): void {
+  if (tagOptions.length === 0) {
+    return;
+  }
+
+  tagFilterOpen = true;
+  renderTagFilter({ preserveInput: true });
+}
+
+function closeTagFilterList(resetInput: boolean): void {
+  if (!tagFilterOpen && !resetInput) {
+    return;
+  }
+
+  tagFilterOpen = false;
+  renderTagFilter({ preserveInput: !resetInput });
+}
+
+function renderTagFilter(options: { preserveInput?: boolean } = {}): void {
+  const disabled = tagOptions.length === 0;
+  const listOpen = tagFilterOpen && !disabled;
+
+  if (!options.preserveInput) {
+    tagFilterInput.value = selectedTag ?? "";
+  }
+
+  tagFilterInput.disabled = disabled;
+  tagFilterInput.placeholder = disabled ? "No tags" : "All tags";
+  tagFilterInput.setAttribute("aria-expanded", String(listOpen));
+  tagFilterInput.setAttribute(
+    "aria-label",
+    selectedTag === null
+      ? "Filter by site tag"
+      : `Filter by site tag, selected ${selectedTag}`
+  );
+  tagFilterClear.disabled = selectedTag === null;
+  tagFilterClear.setAttribute(
+    "aria-label",
+    selectedTag === null
+      ? "All tags selected"
+      : `Clear ${selectedTag} tag filter`
+  );
+  tagFilterList.hidden = !listOpen;
+  window.__RIMU_SELECTED_TAG__ = selectedTag;
+  window.__RIMU_TAG_OPTION_COUNT__ = tagOptions.length;
+
+  renderTagFilterOptions();
+}
+
+function renderTagFilterOptions(): void {
+  const matches = filterSiteTagOptions(tagOptions, tagFilterInput.value);
+  const children: HTMLElement[] = [
+    createTagOptionButton(null, "All tags", loadedSiteCount, selectedTag === null)
+  ];
+
+  for (const option of matches) {
+    children.push(
+      createTagOptionButton(
+        option.tag,
+        option.tag,
+        option.count,
+        selectedTag === option.tag
+      )
+    );
+  }
+
+  if (matches.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "tag-filter-empty";
+    empty.textContent = "No matching tags";
+    children.push(empty);
+  }
+
+  tagFilterList.replaceChildren(...children);
+}
+
+function createTagOptionButton(
+  tag: string | null,
+  label: string,
+  count: number,
+  active: boolean
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  const labelElement = document.createElement("span");
+  const countElement = document.createElement("span");
+
+  button.type = "button";
+  button.className = "tag-filter-option";
+  button.dataset.tagValue = tag ?? "";
+  button.setAttribute("role", "option");
+  button.setAttribute("aria-selected", String(active));
+  button.classList.toggle("is-active", active);
+
+  labelElement.className = "tag-filter-option-label";
+  labelElement.textContent = label;
+
+  countElement.className = "tag-filter-option-count";
+  countElement.textContent = String(count);
+
+  button.append(labelElement, countElement);
+
+  return button;
 }
 
 function onToggleLinksClick(): void {
@@ -483,7 +727,8 @@ function getInitialBrowserConfig(): InitialBrowserConfig {
     autoRefresh: parseBooleanQueryParam(params.get("autoRefresh")),
     demoMode: parseBooleanQueryParam(params.get("demoMode")),
     radioLink: parseBooleanQueryParam(params.get("radioLink")),
-    filters: parseStatusFilterQueryParam(params.get("filters"))
+    filters: parseStatusFilterQueryParam(params.get("filters")),
+    tag: parseTagQueryParam(params.get("tag"))
   };
 }
 
@@ -523,6 +768,16 @@ function parseStatusFilterQueryParam(value: string | null): Set<RimuStatus> | un
   return statuses;
 }
 
+function parseTagQueryParam(value: string | null): string | undefined {
+  if (value === null) {
+    return undefined;
+  }
+
+  const tag = value.trim();
+
+  return tag === "" ? undefined : tag;
+}
+
 function syncBrowserUrlConfig(): void {
   const params = new URLSearchParams(window.location.search);
 
@@ -530,6 +785,7 @@ function syncBrowserUrlConfig(): void {
   syncBooleanUrlParam(params, "demoMode", map.getDemoModeState().active, false);
   syncBooleanUrlParam(params, "radioLink", map.getLinksVisible(), true);
   syncFilterUrlParam(params);
+  syncTagUrlParam(params);
 
   const query = params.toString();
   const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}${
@@ -567,6 +823,15 @@ function syncFilterUrlParam(params: URLSearchParams): void {
   }
 
   params.set("filters", visibleFilters.join(","));
+}
+
+function syncTagUrlParam(params: URLSearchParams): void {
+  if (selectedTag === null) {
+    params.delete("tag");
+    return;
+  }
+
+  params.set("tag", selectedTag);
 }
 
 function delay(ms: number): Promise<void> {
