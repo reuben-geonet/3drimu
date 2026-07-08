@@ -5,6 +5,7 @@ import { RIMU_STATUSES, STATUS_LABELS } from "./status";
 import {
   buildSiteTagOptions,
   filterSiteTagOptions,
+  formatSiteTagCount,
   type SiteTagOption
 } from "./tagFilters";
 import { ThemeController } from "./theme";
@@ -81,6 +82,7 @@ const visibleStatuses = new Set<RimuStatus>(RIMU_STATUSES);
 let selectedTag: string | null = initialBrowserConfig.tag ?? null;
 let tagOptions: SiteTagOption[] = [];
 let loadedSiteCount = 0;
+let loadedSites: readonly SiteMarker[] = [];
 let tagFilterOpen = false;
 let autoRefreshActive = false;
 let autoRefreshTimer: number | undefined;
@@ -236,6 +238,7 @@ function onLegendClick(event: MouseEvent): void {
 
   map.setVisibleStatuses(visibleStatuses);
   renderLegend(legend, visibleStatuses);
+  updateTagOptions(loadedSites);
   syncVisibleSiteCount();
   syncBrowserUrlConfig();
 }
@@ -323,8 +326,9 @@ function onDocumentPointerDown(event: PointerEvent): void {
 }
 
 function updateTagOptions(sites: readonly SiteMarker[]): void {
+  loadedSites = sites;
   loadedSiteCount = sites.length;
-  tagOptions = buildSiteTagOptions(sites);
+  tagOptions = buildSiteTagOptions(sites, (site) => visibleStatuses.has(site.status));
 
   if (selectedTag !== null && !hasTagOption(selectedTag)) {
     selectedTag = null;
@@ -412,7 +416,7 @@ function renderTagFilterOptions(): void {
       createTagOptionButton(
         option.tag,
         option.tag,
-        option.count,
+        formatSiteTagCount(option.visibleCount, option.totalCount),
         selectedTag === option.tag
       )
     );
@@ -431,7 +435,7 @@ function renderTagFilterOptions(): void {
 function createTagOptionButton(
   tag: string | null,
   label: string,
-  count: number,
+  count: string | number,
   active: boolean
 ): HTMLButtonElement {
   const button = document.createElement("button");

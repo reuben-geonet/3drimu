@@ -412,11 +412,11 @@ test("filters sites by a single selected tag and combines with statuses", async 
 
   await tagInput.click();
   await expect(page.getByRole("option", { name: /^All tags 3$/ })).toBeVisible();
-  await expect(page.getByRole("option", { name: /^gnss 2$/ })).toBeVisible();
-  await expect(page.getByRole("option", { name: /^mains12 2$/ })).toBeVisible();
-  await expect(page.getByRole("option", { name: /^building 1$/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /^gnss 2\/2$/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /^mains12 2\/2$/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /^building 1\/1$/ })).toBeVisible();
 
-  await selectTag(page, "gn", /^gnss 2$/);
+  await selectTag(page, "gn", /^gnss 2\/2$/);
 
   await expect(tagInput).toHaveValue("gnss");
   await expect
@@ -435,6 +435,9 @@ test("filters sites by a single selected tag and combines with statuses", async 
     .poll(() => page.evaluate(() => window.__RIMU_VISIBLE_SITE_COUNT__))
     .toBe(1);
 
+  await tagInput.click();
+  await expect(page.getByRole("option", { name: /^gnss 1\/2$/ })).toBeVisible();
+
   await page.getByTestId("tag-filter-clear").click();
 
   await expect(tagInput).toHaveValue("");
@@ -447,6 +450,9 @@ test("filters sites by a single selected tag and combines with statuses", async 
   await expect
     .poll(() => getSearchParam(page, "tag"))
     .toBeNull();
+
+  await tagInput.click();
+  await expect(page.getByRole("option", { name: /^mains12 1\/2$/ })).toBeVisible();
 });
 
 test("loads status and tag filters from query parameters", async ({ page }) => {

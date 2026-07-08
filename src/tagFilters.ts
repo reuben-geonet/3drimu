@@ -4,36 +4,52 @@ export interface SiteWithTags {
 
 export interface SiteTagOption {
   tag: string;
-  count: number;
+  visibleCount: number;
+  totalCount: number;
   label: string;
 }
 
-export function buildSiteTagOptions(
-  sites: readonly SiteWithTags[]
+export function buildSiteTagOptions<TSite extends SiteWithTags>(
+  sites: readonly TSite[],
+  isVisibleSite: (site: TSite) => boolean = () => true
 ): SiteTagOption[] {
-  const counts = new Map<string, number>();
+  const counts = new Map<string, { visible: number; total: number }>();
 
   for (const site of sites) {
     const siteTags = new Set(site.tags.filter((tag) => tag.length > 0));
+    const visible = isVisibleSite(site);
 
     for (const tag of siteTags) {
-      counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      const count = counts.get(tag) ?? { visible: 0, total: 0 };
+
+      count.total += 1;
+
+      if (visible) {
+        count.visible += 1;
+      }
+
+      counts.set(tag, count);
     }
   }
 
   return [...counts.entries()]
     .sort(([tagA, countA], [tagB, countB]) => {
-      if (countA !== countB) {
-        return countB - countA;
+      if (countA.total !== countB.total) {
+        return countB.total - countA.total;
       }
 
       return tagA.localeCompare(tagB);
     })
     .map(([tag, count]) => ({
       tag,
-      count,
-      label: `${tag} ${count}`
+      visibleCount: count.visible,
+      totalCount: count.total,
+      label: `${tag} ${formatSiteTagCount(count.visible, count.total)}`
     }));
+}
+
+export function formatSiteTagCount(visibleCount: number, totalCount: number): string {
+  return `${visibleCount}/${totalCount}`;
 }
 
 export function filterSiteTagOptions(

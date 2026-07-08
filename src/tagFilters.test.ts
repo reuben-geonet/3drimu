@@ -10,16 +10,30 @@ describe("buildSiteTagOptions", () => {
         { tags: ["building"] }
       ])
     ).toEqual([
-      { tag: "mains12", count: 2, label: "mains12 2" },
-      { tag: "building", count: 1, label: "building 1" },
-      { tag: "gnss", count: 1, label: "gnss 1" },
-      { tag: "seismic", count: 1, label: "seismic 1" }
+      { tag: "mains12", visibleCount: 2, totalCount: 2, label: "mains12 2/2" },
+      { tag: "building", visibleCount: 1, totalCount: 1, label: "building 1/1" },
+      { tag: "gnss", visibleCount: 1, totalCount: 1, label: "gnss 1/1" },
+      { tag: "seismic", visibleCount: 1, totalCount: 1, label: "seismic 1/1" }
+    ]);
+  });
+
+  it("counts visible sites separately from total sites", () => {
+    expect(
+      buildSiteTagOptions(
+        [
+          { tags: ["gnss"], visible: true },
+          { tags: ["gnss"], visible: false }
+        ],
+        (site) => site.visible
+      )
+    ).toEqual([
+      { tag: "gnss", visibleCount: 1, totalCount: 2, label: "gnss 1/2" }
     ]);
   });
 
   it("skips empty tags", () => {
     expect(buildSiteTagOptions([{ tags: ["", "gnss"] }])).toEqual([
-      { tag: "gnss", count: 1, label: "gnss 1" }
+      { tag: "gnss", visibleCount: 1, totalCount: 1, label: "gnss 1/1" }
     ]);
   });
 });
@@ -33,7 +47,7 @@ describe("filterSiteTagOptions", () => {
     ]);
 
     expect(filterSiteTagOptions(options, "GNS")).toEqual([
-      { tag: "gnss.rt", count: 1, label: "gnss.rt 1" }
+      { tag: "gnss.rt", visibleCount: 1, totalCount: 1, label: "gnss.rt 1/1" }
     ]);
   });
 });
