@@ -114,6 +114,13 @@ const LINK_RAINBOW_COLORS = [
   "#ff7df0",
   "#ff5f7e"
 ] as const;
+const DEMO_CARD_LAYOUT = {
+  minCanvasHeight: 380,
+  maxCanvasHeight: 720,
+  rowsStartY: 190,
+  rowHeight: 51,
+  bottomPadding: 12
+} as const;
 
 export class MapScene {
   private readonly container: HTMLElement;
@@ -838,9 +845,12 @@ export class MapScene {
     site: SiteMarker,
     target: THREE.Vector3
   ): DemoCardVisual | null {
+    const rows = this.getDemoCardRows(site);
+    const canvasHeight = this.getDemoCardCanvasHeight(rows.length);
+    const worldHeight = this.getDemoCardWorldHeight(canvasHeight);
     const canvas = document.createElement("canvas");
     canvas.width = DEMO_CARD.canvasWidth;
-    canvas.height = DEMO_CARD.canvasHeight;
+    canvas.height = canvasHeight;
 
     const context = canvas.getContext("2d");
 
@@ -859,14 +869,14 @@ export class MapScene {
       depthWrite: false
     });
     const mesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(DEMO_CARD.worldWidth, DEMO_CARD.worldHeight),
+      new THREE.PlaneGeometry(DEMO_CARD.worldWidth, worldHeight),
       material
     );
     const group = new THREE.Group();
 
     mesh.renderOrder = 12;
     group.add(mesh);
-    group.position.copy(this.getDemoCardPosition(target));
+    group.position.copy(this.getDemoCardPosition(target, worldHeight));
     group.lookAt(this.camera.position);
     group.scale.setScalar(0.72);
     this.demoCardGroup.add(group);
@@ -879,7 +889,7 @@ export class MapScene {
       texture,
       canvas,
       context,
-      rows: this.getDemoCardRows(site),
+      rows,
       createdAt: performance.now(),
       fadeStartedAt: null
     };
@@ -891,7 +901,10 @@ export class MapScene {
     return card;
   }
 
-  private getDemoCardPosition(target: THREE.Vector3): THREE.Vector3 {
+  private getDemoCardPosition(
+    target: THREE.Vector3,
+    worldHeight: number
+  ): THREE.Vector3 {
     const forward = this.camera.position.clone().sub(target);
     forward.y = 0;
 
@@ -903,11 +916,33 @@ export class MapScene {
 
     const side = new THREE.Vector3(-forward.z, 0, forward.x).normalize();
 
+    const bottomOffset = DEMO_CARD.verticalOffset - DEMO_CARD.worldHeight / 2;
+    const verticalOffset = bottomOffset + worldHeight / 2;
+
     return target
       .clone()
       .addScaledVector(side, DEMO_CARD.sideOffset)
       .addScaledVector(forward, DEMO_CARD.forwardOffset)
-      .add(new THREE.Vector3(0, DEMO_CARD.verticalOffset, 0));
+      .add(new THREE.Vector3(0, verticalOffset, 0));
+  }
+
+  private getDemoCardCanvasHeight(rowCount: number): number {
+    const contentHeight =
+      DEMO_CARD_LAYOUT.rowsStartY +
+      rowCount * DEMO_CARD_LAYOUT.rowHeight +
+      DEMO_CARD_LAYOUT.bottomPadding;
+
+    return Math.min(
+      DEMO_CARD_LAYOUT.maxCanvasHeight,
+      Math.max(DEMO_CARD_LAYOUT.minCanvasHeight, contentHeight)
+    );
+  }
+
+  private getDemoCardWorldHeight(canvasHeight: number): number {
+    return (
+      DEMO_CARD.worldWidth *
+      (canvasHeight / DEMO_CARD.canvasWidth)
+    );
   }
 
   private getDemoCardRows(site: SiteMarker): DemoCardRow[] {
@@ -1124,9 +1159,6 @@ export class MapScene {
     drawStatusPill(context, statusLabel, accent, statusPillX, 66);
     context.textBaseline = "alphabetic";
 
-    const rowsStartY = 190;
-    const rowHeight = 51;
-
     for (let index = 0; index < card.rows.length; index++) {
       const row = card.rows[index];
       const rowAge =
@@ -1139,7 +1171,8 @@ export class MapScene {
         continue;
       }
 
-      const y = rowsStartY + index * rowHeight;
+      const y =
+        DEMO_CARD_LAYOUT.rowsStartY + index * DEMO_CARD_LAYOUT.rowHeight;
       const settled = rowAge >= DEMO_ANIMATION.cardCheckingMs;
       const rowAccent = row.status ? STATUS_COLORS[row.status] : "#f5f7fb";
       const value = row.checkable && !settled ? "Checking..." : row.value;
