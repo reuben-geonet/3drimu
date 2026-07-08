@@ -9,6 +9,7 @@ import {
 } from "./tagFilters";
 import { ThemeController } from "./theme";
 import type { RimuStatus, SiteMarker } from "./types";
+import { startAppUpdateRefresh } from "./updateRefresh";
 import { WakeLockController } from "./wakeLock";
 
 const MIN_LOADING_MS = 2400;
@@ -42,11 +43,15 @@ declare global {
     __RIMU_LAST_LOAD_SOURCE__?: "live" | "fallback";
     __RIMU_SELECTED_TAG__?: string | null;
     __RIMU_TAG_OPTION_COUNT__?: number;
+    __RIMU_APP_VERSION__?: string;
+    __RIMU_UPDATE_REFRESH_ACTIVE__?: boolean;
+    __RIMU_UPDATE_DETECTED__?: boolean;
   }
 }
 
 const sceneRoot = requiredElement("scene-root");
 const loadingOverlay = requiredElement("loading-overlay");
+const loadingCopy = requiredElement("loading-copy");
 const legend = requiredElement("legend");
 const tagFilter = requiredElement("tag-filter");
 const tagFilterInput = requiredElement<HTMLInputElement>("tag-filter-input");
@@ -138,6 +143,17 @@ async function boot(): Promise<void> {
   window.__RIMU_MAP_READY__ = true;
   window.__RIMU_SITE_COUNT__ = data.sites.length;
   window.__RIMU_LAST_LOAD_SOURCE__ = data.loadedFromLiveApi ? "live" : "fallback";
+  startAppUpdateRefresh({
+    onVersion: (version) => {
+      window.__RIMU_APP_VERSION__ = version;
+      window.__RIMU_UPDATE_REFRESH_ACTIVE__ = true;
+    },
+    onUpdateDetected: () => {
+      window.__RIMU_UPDATE_DETECTED__ = true;
+      loadingCopy.textContent = "Updating...";
+      loadingOverlay.classList.remove("is-hidden");
+    }
+  });
 }
 
 async function refresh(): Promise<void> {
