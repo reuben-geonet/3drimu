@@ -1,5 +1,10 @@
 type WakeLockSentinel = {
   release: () => Promise<void>;
+  addEventListener: (
+    type: "release",
+    listener: () => void,
+    options?: AddEventListenerOptions
+  ) => void;
 };
 
 type WakeLockManager = {
@@ -18,9 +23,12 @@ export class WakeLockController {
   constructor() {
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", () => {
-        if (this.active && document.visibilityState === "visible") {
+        if (this.canHoldWakeLock()) {
           void this.requestWakeLock();
+          return;
         }
+
+        void this.releaseWakeLock();
       });
     }
   }
@@ -41,20 +49,27 @@ export class WakeLockController {
   }
 
   private async requestWakeLock(): Promise<void> {
-    if (this.requestPending || this.sentinel || !this.isSupported()) {
+    if (this.requestPending || this.sentinel || !this.canHoldWakeLock()) {
       return;
     }
 
-    console.log("WakeLock Supported: ", this.isSupported());
     this.requestPending = true;
 
     try {
-      const wakeLock = (navigator as Navigator & NavigatorWithWakeLock).wakeLock;
-      this.sentinel = wakeLock ? await wakeLock.request("screen") : null;
+      const wakeLock = this.getWakeLock();
+      const sentinel = await wakeLock.request("screen");
+      sentinel.addEventListener(
+        "release",
+        () => this.onWakeLockReleased(sentinel),
+        { once: true }
+      );
 
-      if (this.sentinel) {
-        console.log("WakeLock acquired successfully");
+      if (!this.canHoldWakeLock()) {
+        await sentinel.release();
+        return;
       }
+
+      this.sentinel = sentinel;
     } catch {
       this.sentinel = null;
     } finally {
@@ -78,6 +93,41 @@ export class WakeLockController {
   }
 
   private isSupported(): boolean {
-    return typeof navigator !== "undefined" && "wakeLock" in navigator;
+    if (typeof navigator === "undefined") {
+      return false;
+    }
+
+    const wakeLock = (navigator as Navigator & NavigatorWithWakeLock).wakeLock;
+    return typeof wakeLock?.request === "function";
+  }
+
+  private canHoldWakeLock(): boolean {
+    return this.active && this.isVisible() && this.isSupported();
+  }
+
+  private isVisible(): boolean {
+    return typeof document === "undefined" || document.visibilityState === "visible";
+  }
+
+  private getWakeLock(): WakeLockManager {
+    const wakeLock = (navigator as Navigator & NavigatorWithWakeLock).wakeLock;
+
+    if (!wakeLock) {
+      throw new Error("Screen Wake Lock API is unavailable");
+    }
+
+    return wakeLock;
+  }
+
+  private onWakeLockReleased(sentinel: WakeLockSentinel): void {
+    if (this.sentinel !== sentinel) {
+      return;
+    }
+
+    this.sentinel = null;
+
+    if (this.canHoldWakeLock()) {
+      void this.requestWakeLock();
+    }
   }
 }
