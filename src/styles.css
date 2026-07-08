@@ -597,7 +597,7 @@ p {
   z-index: 6;
   top: calc(100% + 0.32rem);
   left: 0;
-  width: min(20rem, calc(100vw - 2rem));
+  width: 100%;
   max-height: min(18rem, 52vh);
   overflow: auto;
   border: 1px solid color-mix(in srgb, var(--panel-border) 86%, transparent);
