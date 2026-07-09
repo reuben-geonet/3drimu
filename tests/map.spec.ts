@@ -321,6 +321,11 @@ test("shows image-only camera card for volcano demo camera states", async ({ pag
   await expect(footer).not.toContainText("Volcano Camera");
   await expect(footer).not.toContainText("Ruapehu from North");
   await expect(footer.locator(".demo-camera-pixels span")).toHaveCount(18);
+  await expect(footer.locator(".demo-camera-image")).toHaveCSS(
+    "aspect-ratio",
+    "4 / 3"
+  );
+  await expect(footer.locator("img")).toHaveCSS("object-fit", "contain");
   await expect(footer.locator("img")).toHaveAttribute(
     "src",
     /m-ruapehunorth\.jpg/

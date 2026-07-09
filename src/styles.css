@@ -833,8 +833,8 @@ p {
 .tooltip-camera img {
   display: block;
   width: 100%;
-  max-height: 10rem;
-  object-fit: cover;
+  height: auto;
+  object-fit: contain;
   border-radius: 6px;
 }
 
@@ -861,7 +861,7 @@ p {
 .demo-camera-image {
   position: relative;
   display: grid;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: 4 / 3;
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.05), transparent 38%),
     #050a12;
@@ -903,7 +903,7 @@ p {
   grid-area: 1 / 1;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   opacity: 0;
   filter: saturate(0.74) contrast(1.15);
   transition:
