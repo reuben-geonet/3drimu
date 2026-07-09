@@ -214,9 +214,6 @@ export class MapScene {
   private readonly activeMarkerFlashColor = new THREE.Color(
     DEMO_ACTIVE_MARKER.flashColor
   );
-  private readonly activeMarkerHaloColor = new THREE.Color(
-    DEMO_ACTIVE_MARKER.haloColor
-  );
   private readonly visibleStatuses = new Set<RimuStatus>(RIMU_STATUSES);
   private readonly visibleVolcanoLevels = new Set<VolcanicAlertLevel>([
     0,
@@ -909,7 +906,7 @@ export class MapScene {
       const activeHalo = new THREE.Mesh(
         activeHaloGeometry,
         new THREE.MeshBasicMaterial({
-          color: this.activeMarkerHaloColor,
+          color,
           transparent: true,
           opacity: 0,
           blending: THREE.AdditiveBlending,
@@ -927,7 +924,7 @@ export class MapScene {
           const orbitRing = new THREE.Mesh(
             activeOrbitRingGeometry,
             new THREE.MeshBasicMaterial({
-              color: this.activeMarkerHaloColor,
+              color,
               transparent: true,
               opacity: 0,
               blending: THREE.AdditiveBlending,
