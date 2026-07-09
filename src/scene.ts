@@ -1,4 +1,8 @@
 import * as THREE from "three";
+import {
+  CSS3DObject,
+  CSS3DRenderer
+} from "three/examples/jsm/renderers/CSS3DRenderer.js";
 import { feature } from "topojson-client";
 import countries50m from "world-atlas/countries-50m.json";
 import type {
@@ -19,7 +23,16 @@ import {
   type ProjectedMarkerCandidate
 } from "./markerInteraction";
 import { RIMU_STATUSES, STATUS_COLORS, STATUS_LABELS } from "./status";
-import type { LinkArc, RimuStatus, SiteMarker } from "./types";
+import type {
+  LinkArc,
+  RimuStatus,
+  SiteMarker,
+  VolcanoCameraFeed,
+  VolcanicAlertLevel,
+  VolcanoMarker
+} from "./types";
+import { getLatestCameraImageUrl } from "./volcanoCameras";
+import { getVolcanoLevelColor } from "./volcanoes";
 
 interface MarkerVisual {
   site: SiteMarker;
@@ -49,12 +62,29 @@ interface LinkPacketVisual {
   delay: number;
 }
 
+interface VolcanoVisual {
+  volcano: VolcanoMarker;
+  group: THREE.Group;
+  marker: THREE.Mesh<THREE.ConeGeometry, THREE.MeshStandardMaterial>;
+  beam: THREE.Mesh<THREE.CylinderGeometry, THREE.MeshBasicMaterial>;
+  halo: THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
+  phase: number;
+}
+
 export interface DemoModeState {
   active: boolean;
   routeSize: number;
   currentSiteId: string | null;
   currentSiteName: string | null;
 }
+
+export type MapSceneHoverTarget =
+  | { type: "site"; site: SiteMarker }
+  | { type: "volcano"; volcano: VolcanoMarker };
+
+type DemoRouteTarget =
+  | { id: string; type: "site"; site: SiteMarker }
+  | { id: string; type: "volcano"; volcano: VolcanoMarker };
 
 interface DemoCardRow {
   label: string;
@@ -63,8 +93,16 @@ interface DemoCardRow {
   checkable: boolean;
 }
 
+interface DemoCardRowLayout {
+  row: DemoCardRow;
+  y: number;
+  height: number;
+  labelLines: string[];
+  valueLines: string[];
+}
+
 interface DemoCardVisual {
-  site: SiteMarker;
+  target: DemoRouteTarget;
   group: THREE.Group;
   mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
   material: THREE.MeshBasicMaterial;
@@ -72,16 +110,35 @@ interface DemoCardVisual {
   canvas: HTMLCanvasElement;
   context: CanvasRenderingContext2D;
   rows: DemoCardRow[];
+  rowLayouts: DemoCardRowLayout[];
+  title: string;
+  pillLabel: string;
+  accent: string;
+  worldHeight: number;
+  shouldFlash: boolean;
   createdAt: number;
   fadeStartedAt: number | null;
+  overlay: DemoOverlayVisual | null;
+}
+
+interface DemoOverlayVisual {
+  target: DemoRouteTarget;
+  cameraFeed: VolcanoCameraFeed | null;
+  element: HTMLElement;
+  cssObject: CSS3DObject;
+  createdAt: number;
+  imageReadyAt: number;
+  revealStartedAt: number | null;
+  imageElement: HTMLImageElement | null;
+  state: "detected" | "loading" | "revealing" | "ready" | "empty" | "error";
 }
 
 interface MapSceneOptions {
   onMarkerHover?: (
-    site: SiteMarker | null,
+    target: MapSceneHoverTarget | null,
     point?: { x: number; y: number }
   ) => void;
-  onMarkerClick?: (site: SiteMarker) => void;
+  onMarkerClick?: (target: MapSceneHoverTarget) => void;
   onDemoStateChange?: (state: DemoModeState) => void;
 }
 
@@ -104,6 +161,14 @@ const LINK_PACKET_RADIUS = 0.07;
 const LINK_PACKET_COUNT = 9;
 const MARKER_CLICK_DRAG_TOLERANCE_PX = 6;
 const MARKER_PICK_RADIUS_PX = 18;
+const VOLCANO_MARKER_SCALE = 0.46;
+const CAMERA_DATA_PARTICLE_COUNT = 18;
+const DEMO_CAMERA_REVEAL_COLUMNS = 20;
+const DEMO_CAMERA_REVEAL_ROWS = 12;
+const DEMO_CAMERA_REVEAL_MS = 1360;
+const DEMO_CAMERA_CARD_WIDTH_PX = 224;
+const DEMO_CAMERA_CARD_WORLD_WIDTH = DEMO_CARD.worldWidth * 0.72;
+const DEMO_CAMERA_CARD_SIDE_GAP = 0.18;
 
 const LINK_RAINBOW_COLORS = [
   "#ff5f7e",
@@ -116,16 +181,20 @@ const LINK_RAINBOW_COLORS = [
 ] as const;
 const DEMO_CARD_LAYOUT = {
   minCanvasHeight: 380,
-  maxCanvasHeight: 720,
-  rowsStartY: 190,
-  rowHeight: 51,
-  bottomPadding: 12
+  rowsStartY: 174,
+  rowMinHeight: 48,
+  rowGap: 10,
+  rowPaddingY: 14,
+  rowLineHeight: 30,
+  bottomPadding: 54
 } as const;
 
 export class MapScene {
   private readonly container: HTMLElement;
   private readonly renderer: THREE.WebGLRenderer;
+  private readonly cssRenderer: CSS3DRenderer;
   private readonly scene = new THREE.Scene();
+  private readonly cssScene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
   private readonly cameraRig: MapCameraRig;
   private readonly mapGroup = new THREE.Group();
@@ -134,11 +203,13 @@ export class MapScene {
   private readonly gridGroup = new THREE.Group();
   private readonly linkGroup = new THREE.Group();
   private readonly markerGroup = new THREE.Group();
+  private readonly volcanoGroup = new THREE.Group();
   private readonly demoCardGroup = new THREE.Group();
   private readonly markers: MarkerVisual[] = [];
+  private readonly volcanoMarkers: VolcanoVisual[] = [];
   private readonly links: LinkVisual[] = [];
   private readonly demoCards: DemoCardVisual[] = [];
-  private readonly markerPickCandidates: ProjectedMarkerCandidate<SiteMarker>[] = [];
+  private readonly markerPickCandidates: ProjectedMarkerCandidate<MapSceneHoverTarget>[] = [];
   private readonly markerProjection = new THREE.Vector3();
   private readonly activeMarkerFlashColor = new THREE.Color(
     DEMO_ACTIVE_MARKER.flashColor
@@ -147,7 +218,16 @@ export class MapScene {
     DEMO_ACTIVE_MARKER.haloColor
   );
   private readonly visibleStatuses = new Set<RimuStatus>(RIMU_STATUSES);
+  private readonly visibleVolcanoLevels = new Set<VolcanicAlertLevel>([
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ]);
   private visibleTag: string | null = null;
+  private volcanoesVisible = true;
   private readonly startedAt = performance.now();
   private readonly onMarkerHover?: MapSceneOptions["onMarkerHover"];
   private readonly onMarkerClick?: MapSceneOptions["onMarkerClick"];
@@ -178,6 +258,7 @@ export class MapScene {
     depthWrite: false
   });
   private sites: SiteMarker[] = [];
+  private volcanoes: VolcanoMarker[] = [];
   private linksVisible = true;
   private previousLinkElapsed = 0;
   private animationFrame = 0;
@@ -187,11 +268,12 @@ export class MapScene {
   private pointerMovedAfterDown = false;
   private demoActive = false;
   private demoGeneration = 0;
-  private demoRoute: SiteMarker[] = [];
+  private demoRoute: DemoRouteTarget[] = [];
   private demoRouteIndex = 0;
   private demoLastSiteId: string | null = null;
-  private demoCurrentSite: SiteMarker | null = null;
+  private demoCurrentTarget: DemoRouteTarget | null = null;
   private demoFocusedSiteId: string | null = null;
+  private demoFocusedVolcanoId: string | null = null;
   private demoMarkerFocusStartedAt = 0;
   private demoMarkerFocusReleasedAt: number | null = null;
   private activeDemoCard: DemoCardVisual | null = null;
@@ -214,6 +296,11 @@ export class MapScene {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.container.appendChild(this.renderer.domElement);
+    this.cssRenderer = new CSS3DRenderer();
+    this.cssRenderer.setSize(this.container.clientWidth, this.container.clientHeight);
+    this.cssRenderer.domElement.className = "css3d-layer";
+    this.cssRenderer.domElement.style.pointerEvents = "none";
+    this.container.appendChild(this.cssRenderer.domElement);
 
     this.cameraRig = new MapCameraRig({
       aspect: this.container.clientWidth / this.container.clientHeight,
@@ -225,7 +312,12 @@ export class MapScene {
     this.mapGroup.add(this.createOceanSurface());
     this.mapGroup.add(this.gridGroup, this.countryGroup, this.borderGroup);
     this.scene.add(this.mapGroup);
-    this.scene.add(this.linkGroup, this.markerGroup, this.demoCardGroup);
+    this.scene.add(
+      this.linkGroup,
+      this.markerGroup,
+      this.volcanoGroup,
+      this.demoCardGroup
+    );
     this.scene.add(this.createStars());
     this.createGrid();
     this.createCountries();
@@ -251,6 +343,15 @@ export class MapScene {
     this.clearLinks();
     this.addLinks(links);
     this.renderVisibleMarkers();
+
+    if (this.demoActive) {
+      this.restartDemoLoop();
+    }
+  }
+
+  setVolcanoes(volcanoes: VolcanoMarker[]): void {
+    this.volcanoes = volcanoes;
+    this.renderVisibleVolcanoes();
 
     if (this.demoActive) {
       this.restartDemoLoop();
@@ -310,6 +411,39 @@ export class MapScene {
     return this.getVisibleSites().length;
   }
 
+  setVolcanoesVisible(visible: boolean): void {
+    if (this.volcanoesVisible === visible) {
+      return;
+    }
+
+    this.volcanoesVisible = visible;
+    this.clearHover();
+    this.renderVisibleVolcanoes();
+
+    if (this.demoActive) {
+      this.restartDemoLoop();
+    }
+  }
+
+  setVisibleVolcanoLevels(levels: ReadonlySet<VolcanicAlertLevel>): void {
+    this.visibleVolcanoLevels.clear();
+
+    for (const level of levels) {
+      this.visibleVolcanoLevels.add(level);
+    }
+
+    this.clearHover();
+    this.renderVisibleVolcanoes();
+
+    if (this.demoActive) {
+      this.restartDemoLoop();
+    }
+  }
+
+  getVisibleVolcanoCount(): number {
+    return this.getVisibleVolcanoes().length;
+  }
+
   setDemoMode(active: boolean): void {
     if (active === this.demoActive) {
       return;
@@ -327,8 +461,10 @@ export class MapScene {
     return {
       active: this.demoActive,
       routeSize: this.demoRoute.length,
-      currentSiteId: this.demoCurrentSite?.id ?? null,
-      currentSiteName: this.demoCurrentSite?.locality ?? null
+      currentSiteId: this.demoCurrentTarget?.id ?? null,
+      currentSiteName: this.demoCurrentTarget
+        ? getDemoTargetTitle(this.demoCurrentTarget)
+        : null
     };
   }
 
@@ -345,6 +481,7 @@ export class MapScene {
     this.disposed = true;
     this.stopDemoMode(false);
     this.clearDemoCards();
+    this.clearVolcanoes();
     cancelAnimationFrame(this.animationFrame);
     window.removeEventListener("resize", this.onResize);
     this.renderer.domElement.removeEventListener("pointermove", this.onPointerMove);
@@ -353,12 +490,13 @@ export class MapScene {
     this.renderer.domElement.removeEventListener("pointerleave", this.clearHover);
     this.cameraRig.dispose();
     this.renderer.dispose();
+    this.cssRenderer.domElement.remove();
   }
 
   private startDemoMode(): void {
     this.demoActive = true;
     this.demoGeneration++;
-    this.demoCurrentSite = null;
+    this.demoCurrentTarget = null;
     this.clearDemoMarkerFocus();
     this.activeDemoCard = null;
     this.clearHover();
@@ -380,7 +518,7 @@ export class MapScene {
     this.demoGeneration++;
     this.demoRoute = [];
     this.demoRouteIndex = 0;
-    this.demoCurrentSite = null;
+    this.demoCurrentTarget = null;
     this.clearDemoMarkerFocus();
     this.activeDemoCard = null;
     this.cameraRig.cancelDemoMotion();
@@ -401,7 +539,7 @@ export class MapScene {
     }
 
     this.demoGeneration++;
-    this.demoCurrentSite = null;
+    this.demoCurrentTarget = null;
     this.clearDemoMarkerFocus();
     this.activeDemoCard = null;
     this.cameraRig.cancelDemoMotion();
@@ -419,18 +557,18 @@ export class MapScene {
 
   private async runDemoLoop(generation: number): Promise<void> {
     while (this.isCurrentDemoGeneration(generation)) {
-      const site = this.getNextDemoSite();
+      const targetItem = this.getNextDemoTarget();
 
-      if (!site) {
+      if (!targetItem) {
         this.stopDemoMode(true);
         return;
       }
 
-      this.demoCurrentSite = site;
-      this.demoLastSiteId = site.id;
+      this.demoCurrentTarget = targetItem;
+      this.demoLastSiteId = targetItem.id;
       this.notifyDemoState();
 
-      const target = this.getDemoSiteTarget(site);
+      const target = this.getDemoTargetPosition(targetItem);
       const frontAngle = this.getDemoStartAngle(target);
       const startAngle =
         frontAngle + DEMO_ANIMATION.motionStartAngleOffsetRadians;
@@ -445,8 +583,8 @@ export class MapScene {
         return;
       }
 
-      this.setDemoMarkerFocus(site);
-      this.activeDemoCard = this.createDemoCard(site, target);
+      this.setDemoMarkerFocus(targetItem);
+      this.activeDemoCard = this.createDemoCard(targetItem, target);
       await this.waitForDemoCardIntro(this.activeDemoCard, generation);
 
       if (!this.isCurrentDemoGeneration(generation)) {
@@ -484,11 +622,14 @@ export class MapScene {
   }
 
   private rebuildDemoRoute(): void {
-    this.demoRoute = buildDemoRoute(this.getVisibleSites(), this.demoLastSiteId);
+    this.demoRoute = buildDemoRoute(
+      this.getVisibleDemoTargets(),
+      this.demoLastSiteId
+    );
     this.demoRouteIndex = 0;
   }
 
-  private getNextDemoSite(): SiteMarker | null {
+  private getNextDemoTarget(): DemoRouteTarget | null {
     if (this.demoRoute.length === 0) {
       return null;
     }
@@ -497,24 +638,46 @@ export class MapScene {
       this.rebuildDemoRoute();
     }
 
-    const site = this.demoRoute[this.demoRouteIndex] ?? null;
+    const target = this.demoRoute[this.demoRouteIndex] ?? null;
     this.demoRouteIndex++;
 
-    return site;
+    return target;
   }
 
-  private getDemoSiteTarget(site: SiteMarker): THREE.Vector3 {
-    return this.projectLatLng(site.lat, site.lng, COUNTRY_DEPTH + 1.44);
+  private getVisibleDemoTargets(): DemoRouteTarget[] {
+    return [
+      ...this.getVisibleSites().map((site) => ({
+        id: `site:${site.id}`,
+        type: "site" as const,
+        site
+      })),
+      ...this.getVisibleVolcanoes().map((volcano) => ({
+        id: `volcano:${volcano.id}`,
+        type: "volcano" as const,
+        volcano
+      }))
+    ];
   }
 
-  private setDemoMarkerFocus(site: SiteMarker): void {
-    this.demoFocusedSiteId = site.id;
+  private getDemoTargetPosition(target: DemoRouteTarget): THREE.Vector3 {
+    const point = target.type === "site" ? target.site : target.volcano;
+
+    return this.projectLatLng(point.lat, point.lng, COUNTRY_DEPTH + 1.44);
+  }
+
+  private setDemoMarkerFocus(target: DemoRouteTarget): void {
+    this.demoFocusedSiteId = target.type === "site" ? target.site.id : null;
+    this.demoFocusedVolcanoId =
+      target.type === "volcano" ? target.volcano.id : null;
     this.demoMarkerFocusStartedAt = performance.now();
     this.demoMarkerFocusReleasedAt = null;
   }
 
   private releaseDemoMarkerFocus(): void {
-    if (this.demoFocusedSiteId === null || this.demoMarkerFocusReleasedAt !== null) {
+    if (
+      (this.demoFocusedSiteId === null && this.demoFocusedVolcanoId === null) ||
+      this.demoMarkerFocusReleasedAt !== null
+    ) {
       return;
     }
 
@@ -523,6 +686,7 @@ export class MapScene {
 
   private clearDemoMarkerFocus(): void {
     this.demoFocusedSiteId = null;
+    this.demoFocusedVolcanoId = null;
     this.demoMarkerFocusStartedAt = 0;
     this.demoMarkerFocusReleasedAt = null;
   }
@@ -804,12 +968,93 @@ export class MapScene {
     this.addMarkers(this.getVisibleSites());
   }
 
+  private renderVisibleVolcanoes(): void {
+    this.clearVolcanoes();
+    this.addVolcanoes(this.getVisibleVolcanoes());
+  }
+
   private getVisibleSites(): SiteMarker[] {
     return this.sites.filter(
       (site) =>
         this.visibleStatuses.has(site.status) &&
         (this.visibleTag === null || site.tags.includes(this.visibleTag))
     );
+  }
+
+  private getVisibleVolcanoes(): VolcanoMarker[] {
+    if (!this.volcanoesVisible) {
+      return [];
+    }
+
+    return this.volcanoes.filter((volcano) =>
+      this.visibleVolcanoLevels.has(volcano.level)
+    );
+  }
+
+  private addVolcanoes(volcanoes: VolcanoMarker[]): void {
+    const triangleGeometry = new THREE.ConeGeometry(0.88, 1.18, 3, 1);
+    const beamGeometry = new THREE.CylinderGeometry(0.08, 0.28, 4.2, 3, 1, true);
+    const haloGeometry = new THREE.TorusGeometry(0.92, 0.04, 8, 3);
+
+    for (const volcano of volcanoes) {
+      const color = new THREE.Color(getVolcanoLevelColor(volcano.level));
+      const group = new THREE.Group();
+      const surface = this.projectLatLng(volcano.lat, volcano.lng, COUNTRY_DEPTH + 0.46);
+      const marker = new THREE.Mesh(
+        triangleGeometry,
+        new THREE.MeshStandardMaterial({
+          color,
+          emissive: color,
+          emissiveIntensity: 0.34 + volcano.level * 0.08,
+          roughness: 0.46,
+          metalness: 0.08,
+          transparent: true,
+          opacity: 0.96
+        })
+      );
+      const beam = new THREE.Mesh(
+        beamGeometry,
+        new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.2 + volcano.level * 0.04,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide
+        })
+      );
+      const halo = new THREE.Mesh(
+        haloGeometry,
+        new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.28 + volcano.level * 0.07,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        })
+      );
+
+      group.position.copy(surface);
+      group.scale.setScalar(VOLCANO_MARKER_SCALE);
+      marker.rotation.y = Math.PI / 3;
+      marker.position.y = 0.64;
+      marker.renderOrder = 7;
+      beam.position.y = 2.18;
+      beam.renderOrder = 5;
+      halo.rotation.x = Math.PI / 2;
+      halo.position.y = 0.16;
+      halo.renderOrder = 6;
+      group.add(beam, halo, marker);
+      this.volcanoGroup.add(group);
+      this.volcanoMarkers.push({
+        volcano,
+        group,
+        marker,
+        beam,
+        halo,
+        phase: Math.random() * Math.PI * 2
+      });
+    }
   }
 
   private clearMarkers(): void {
@@ -819,6 +1064,15 @@ export class MapScene {
 
     this.markerGroup.clear();
     this.markers.length = 0;
+  }
+
+  private clearVolcanoes(): void {
+    for (const marker of this.volcanoMarkers) {
+      marker.group.traverse((object) => this.disposeObjectResources(object));
+    }
+
+    this.volcanoGroup.clear();
+    this.volcanoMarkers.length = 0;
   }
 
   private clearLinks(): void {
@@ -842,21 +1096,24 @@ export class MapScene {
   }
 
   private createDemoCard(
-    site: SiteMarker,
-    target: THREE.Vector3
+    routeTarget: DemoRouteTarget,
+    worldTarget: THREE.Vector3
   ): DemoCardVisual | null {
-    const rows = this.getDemoCardRows(site);
-    const canvasHeight = this.getDemoCardCanvasHeight(rows.length);
-    const worldHeight = this.getDemoCardWorldHeight(canvasHeight);
+    const rows = this.getDemoCardRows(routeTarget);
+    const cardMeta = getDemoCardMeta(routeTarget);
     const canvas = document.createElement("canvas");
     canvas.width = DEMO_CARD.canvasWidth;
-    canvas.height = canvasHeight;
 
     const context = canvas.getContext("2d");
 
     if (!context) {
       return null;
     }
+
+    const rowLayouts = this.getDemoCardRowLayouts(context, rows);
+    const canvasHeight = this.getDemoCardCanvasHeight(rowLayouts);
+    const worldHeight = this.getDemoCardWorldHeight(canvasHeight);
+    canvas.height = canvasHeight;
 
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
@@ -876,13 +1133,13 @@ export class MapScene {
 
     mesh.renderOrder = 12;
     group.add(mesh);
-    group.position.copy(this.getDemoCardPosition(target, worldHeight));
+    group.position.copy(this.getDemoCardPosition(worldTarget, worldHeight));
     group.lookAt(this.camera.position);
     group.scale.setScalar(0.72);
     this.demoCardGroup.add(group);
 
     const card: DemoCardVisual = {
-      site,
+      target: routeTarget,
       group,
       mesh,
       material,
@@ -890,9 +1147,18 @@ export class MapScene {
       canvas,
       context,
       rows,
+      rowLayouts,
+      title: cardMeta.title,
+      pillLabel: cardMeta.pillLabel,
+      accent: cardMeta.accent,
+      worldHeight,
+      shouldFlash: cardMeta.shouldFlash,
       createdAt: performance.now(),
-      fadeStartedAt: null
+      fadeStartedAt: null,
+      overlay: null
     };
+
+    card.overlay = this.createDemoOverlay(card);
 
     this.demoCards.push(card);
     this.drawDemoCard(card, performance.now());
@@ -926,16 +1192,224 @@ export class MapScene {
       .add(new THREE.Vector3(0, verticalOffset, 0));
   }
 
-  private getDemoCardCanvasHeight(rowCount: number): number {
-    const contentHeight =
-      DEMO_CARD_LAYOUT.rowsStartY +
-      rowCount * DEMO_CARD_LAYOUT.rowHeight +
-      DEMO_CARD_LAYOUT.bottomPadding;
+  private createDemoOverlay(card: DemoCardVisual): DemoOverlayVisual | null {
+    const cameraFeed = getDemoTargetCameraFeed(card.target);
 
-    return Math.min(
-      DEMO_CARD_LAYOUT.maxCanvasHeight,
-      Math.max(DEMO_CARD_LAYOUT.minCanvasHeight, contentHeight)
+    if (!cameraFeed) {
+      return null;
+    }
+
+    const element = document.createElement("div");
+    const imageWrap = document.createElement("div");
+    const pixelStream = document.createElement("div");
+    const revealGrid = document.createElement("div");
+    const imageElement = document.createElement("img");
+    const createdAt = performance.now();
+    const cssObject = new CSS3DObject(element);
+    const overlay: DemoOverlayVisual = {
+      target: card.target,
+      cameraFeed,
+      element,
+      cssObject,
+      createdAt,
+      imageReadyAt:
+        createdAt + (card.target.type === "site" ? 1900 : 1300),
+      revealStartedAt: null,
+      imageElement,
+      state: "detected"
+    };
+
+    element.className = `demo-camera-footer is-${overlay.state}`;
+    element.setAttribute("aria-hidden", "true");
+    element.style.setProperty("--camera-accent", card.accent);
+    imageWrap.className = "demo-camera-image";
+    pixelStream.className = "demo-camera-pixels";
+    revealGrid.className = "demo-camera-reveal";
+    revealGrid.style.setProperty(
+      "--camera-reveal-cols",
+      String(DEMO_CAMERA_REVEAL_COLUMNS)
     );
+    revealGrid.style.setProperty(
+      "--camera-reveal-rows",
+      String(DEMO_CAMERA_REVEAL_ROWS)
+    );
+
+    for (let index = 0; index < CAMERA_DATA_PARTICLE_COUNT; index++) {
+      const pixel = document.createElement("span");
+
+      pixel.style.setProperty("--pixel-delay", `${index * 54}ms`);
+      pixel.style.setProperty("--pixel-y", `${18 + (index % 7) * 10}%`);
+      pixel.style.setProperty("--pixel-size", `${3 + (index % 3)}px`);
+      pixelStream.appendChild(pixel);
+    }
+
+    for (let row = 0; row < DEMO_CAMERA_REVEAL_ROWS; row++) {
+      for (let column = 0; column < DEMO_CAMERA_REVEAL_COLUMNS; column++) {
+        const tile = document.createElement("span");
+        const scatter = ((row * 11 + column * 7) % 7) * 22;
+        const delay = column * 34 + scatter;
+
+        tile.style.setProperty("--tile-delay", `${delay}ms`);
+        revealGrid.appendChild(tile);
+      }
+    }
+
+    imageElement.alt = cameraFeed.title;
+    imageElement.loading = "eager";
+    imageElement.decoding = "async";
+    imageElement.addEventListener("load", () => {
+      if (performance.now() >= overlay.imageReadyAt) {
+        this.startDemoOverlayReveal(overlay, performance.now());
+      }
+    });
+    imageElement.addEventListener("error", () => {
+      this.setDemoOverlayState(overlay, "error");
+    });
+    imageElement.src = getLatestCameraImageUrl(cameraFeed);
+    imageWrap.append(imageElement, revealGrid);
+    element.append(imageWrap, pixelStream);
+    cssObject.visible = false;
+    this.cssScene.add(cssObject);
+
+    return overlay;
+  }
+
+  private getDemoOverlayAnchor(
+    card: DemoCardVisual,
+    footerWorldWidth: number
+  ): THREE.Vector3 {
+    return card.group.localToWorld(
+      new THREE.Vector3(
+        DEMO_CARD.worldWidth / 2 +
+          DEMO_CAMERA_CARD_SIDE_GAP +
+          footerWorldWidth / 2,
+        0,
+        0.02
+      )
+    );
+  }
+
+  private updateDemoOverlay(card: DemoCardVisual, now: number): void {
+    const overlay = card.overlay;
+
+    if (!overlay) {
+      return;
+    }
+
+    const image = overlay.imageElement;
+
+    if (overlay.cameraFeed && overlay.state !== "error") {
+      if (now < overlay.createdAt + 850 && overlay.target.type === "site") {
+        this.setDemoOverlayState(overlay, "detected");
+      } else if (
+        now < overlay.imageReadyAt ||
+        !image?.complete ||
+        image.naturalWidth === 0
+      ) {
+        this.setDemoOverlayState(overlay, "loading");
+      } else {
+        this.startDemoOverlayReveal(overlay, now);
+
+        if (
+          overlay.revealStartedAt !== null &&
+          now - overlay.revealStartedAt >= DEMO_CAMERA_REVEAL_MS
+        ) {
+          this.setDemoOverlayState(overlay, "ready");
+        }
+      }
+    }
+
+    const footerWorldScale = this.getDemoCameraFooterWorldScale(overlay);
+    const footerWorldWidth =
+      (overlay.element.offsetWidth || DEMO_CAMERA_CARD_WIDTH_PX) *
+      footerWorldScale;
+    const anchor = this.getDemoOverlayAnchor(card, footerWorldWidth);
+    const projected = anchor.clone().project(this.camera);
+    const visible =
+      projected.z >= -1 &&
+      projected.z <= 1 &&
+      Math.abs(projected.x) <= 1.34 &&
+      Math.abs(projected.y) <= 1.34;
+    const opacity = visible ? card.material.opacity : 0;
+
+    overlay.element.style.opacity = String(opacity);
+    overlay.cssObject.visible = opacity > 0.01;
+    overlay.cssObject.position.copy(anchor);
+    overlay.cssObject.quaternion.copy(card.group.quaternion);
+    overlay.cssObject.scale.setScalar(footerWorldScale * card.group.scale.x);
+  }
+
+  private startDemoOverlayReveal(
+    overlay: DemoOverlayVisual,
+    now: number
+  ): void {
+    if (overlay.state === "error" || overlay.state === "ready") {
+      return;
+    }
+
+    overlay.revealStartedAt ??= now;
+    this.setDemoOverlayState(overlay, "revealing");
+  }
+
+  private setDemoOverlayState(
+    overlay: DemoOverlayVisual,
+    state: DemoOverlayVisual["state"]
+  ): void {
+    if (overlay.state === state) {
+      return;
+    }
+
+    overlay.state = state;
+    overlay.element.classList.remove(
+      "is-detected",
+      "is-loading",
+      "is-revealing",
+      "is-ready",
+      "is-empty",
+      "is-error"
+    );
+    overlay.element.classList.add(`is-${state}`);
+
+    const status = overlay.element.querySelector(".demo-camera-status");
+
+    if (status) {
+      status.textContent =
+        state === "detected"
+          ? "Camera Detected"
+          : state === "loading"
+            ? "Downloading image..."
+            : state === "revealing"
+              ? "Building image..."
+              : state === "ready"
+                ? "Latest image"
+                : state === "error"
+                  ? "Camera image unavailable"
+                  : "No camera available";
+    }
+  }
+
+  private disposeDemoOverlay(overlay: DemoOverlayVisual | null): void {
+    if (!overlay) {
+      return;
+    }
+
+    overlay.element.remove();
+    this.cssScene.remove(overlay.cssObject);
+  }
+
+  private getDemoCameraFooterWorldScale(overlay: DemoOverlayVisual): number {
+    const width = overlay.element.offsetWidth || DEMO_CAMERA_CARD_WIDTH_PX;
+
+    return DEMO_CAMERA_CARD_WORLD_WIDTH / width;
+  }
+
+  private getDemoCardCanvasHeight(rowLayouts: DemoCardRowLayout[]): number {
+    const lastRow = rowLayouts.at(-1);
+    const contentHeight = lastRow
+      ? lastRow.y + lastRow.height + DEMO_CARD_LAYOUT.bottomPadding
+      : DEMO_CARD_LAYOUT.minCanvasHeight;
+
+    return Math.max(DEMO_CARD_LAYOUT.minCanvasHeight, contentHeight);
   }
 
   private getDemoCardWorldHeight(canvasHeight: number): number {
@@ -945,7 +1419,74 @@ export class MapScene {
     );
   }
 
-  private getDemoCardRows(site: SiteMarker): DemoCardRow[] {
+  private getDemoCardRowLayouts(
+    context: CanvasRenderingContext2D,
+    rows: DemoCardRow[]
+  ): DemoCardRowLayout[] {
+    const layouts: DemoCardRowLayout[] = [];
+    let y = DEMO_CARD_LAYOUT.rowsStartY;
+
+    for (const row of rows) {
+      context.font = "700 22px Inter, sans-serif";
+      const labelLines = wrapCanvasText(context, row.label, 310);
+      context.font = "700 25px Inter, sans-serif";
+      const valueLines = wrapCanvasText(
+        context,
+        row.value,
+        DEMO_CARD.canvasWidth - 530
+      );
+      const lineCount = Math.max(labelLines.length, valueLines.length, 1);
+      const height = Math.max(
+        DEMO_CARD_LAYOUT.rowMinHeight,
+        DEMO_CARD_LAYOUT.rowPaddingY * 2 +
+          lineCount * DEMO_CARD_LAYOUT.rowLineHeight
+      );
+
+      layouts.push({
+        row,
+        y,
+        height,
+        labelLines,
+        valueLines
+      });
+      y += height + DEMO_CARD_LAYOUT.rowGap;
+    }
+
+    return layouts;
+  }
+
+  private getDemoCardRows(target: DemoRouteTarget): DemoCardRow[] {
+    if (target.type === "volcano") {
+      return [
+        {
+          label: "Alert Level",
+          value: String(target.volcano.level),
+          checkable: false
+        },
+        {
+          label: "Activity",
+          value: target.volcano.activity,
+          checkable: false
+        },
+        {
+          label: "Hazards",
+          value: target.volcano.hazards,
+          checkable: false
+        },
+        {
+          label: "Aviation",
+          value: target.volcano.aviationColor,
+          checkable: false
+        },
+        {
+          label: "Camera",
+          value: target.volcano.cameraFeed ? "Camera feed available" : "No camera available",
+          checkable: false
+        }
+      ];
+    }
+
+    const site = target.site;
     const rows: DemoCardRow[] = [
       {
         label: "Status",
@@ -1007,6 +1548,7 @@ export class MapScene {
       }
 
       this.drawDemoCard(card, now);
+      this.updateDemoOverlay(card, now);
 
       if (
         card !== this.activeDemoCard &&
@@ -1089,15 +1631,14 @@ export class MapScene {
       ? clamp01((now - card.fadeStartedAt) / DEMO_ANIMATION.cardFadeMs)
       : 0;
     const fadeOpacity = 1 - fadeProgress;
-    const flash =
-      card.site.status === "ok" ? 0 : (Math.sin(now / 130) + 1) / 2;
+    const flash = card.shouldFlash ? (Math.sin(now / 130) + 1) / 2 : 0;
     const opacity =
       fadeOpacity * (0.18 + drawEase * 0.82) * (0.86 + flash * 0.14);
     const scale =
       fadeOpacity *
       (0.72 + easeOutBack(drawProgress) * 0.28) *
       this.getDemoCardViewportScale();
-    const accent = STATUS_COLORS[card.site.status];
+    const accent = card.accent;
 
     card.material.opacity = opacity;
     card.group.scale.setScalar(scale);
@@ -1124,7 +1665,7 @@ export class MapScene {
       width - 92,
       96,
       26,
-      hexToRgba(accent, card.site.status === "ok" ? 0.28 : 0.4 + flash * 0.18)
+      hexToRgba(accent, card.shouldFlash ? 0.4 + flash * 0.18 : 0.28)
     );
     strokeRoundRect(
       context,
@@ -1140,8 +1681,7 @@ export class MapScene {
     const headerContentX = 70;
     const headerContentRight = width - 70;
     const headerGap = 28;
-    const statusLabel = STATUS_LABELS[card.site.status];
-    const statusPillWidth = measureStatusPillWidth(context, statusLabel);
+    const statusPillWidth = measureStatusPillWidth(context, card.pillLabel);
     const statusPillX = headerContentRight - statusPillWidth;
     const titleMaxWidth = Math.max(
       0,
@@ -1150,17 +1690,18 @@ export class MapScene {
 
     context.textBaseline = "middle";
     context.fillStyle = "#f5f7fb";
-    drawResizedText(context, card.site.locality, 70, 94, titleMaxWidth, {
+    drawResizedText(context, card.title, 70, 94, titleMaxWidth, {
       weight: 700,
       maxSize: 58,
       minSize: 30
     });
 
-    drawStatusPill(context, statusLabel, accent, statusPillX, 66);
+    drawStatusPill(context, card.pillLabel, accent, statusPillX, 66);
     context.textBaseline = "alphabetic";
 
-    for (let index = 0; index < card.rows.length; index++) {
-      const row = card.rows[index];
+    for (let index = 0; index < card.rowLayouts.length; index++) {
+      const rowLayout = card.rowLayouts[index];
+      const row = rowLayout.row;
       const rowAge =
         age -
         DEMO_ANIMATION.cardDrawMs -
@@ -1171,29 +1712,42 @@ export class MapScene {
         continue;
       }
 
-      const y =
-        DEMO_CARD_LAYOUT.rowsStartY + index * DEMO_CARD_LAYOUT.rowHeight;
       const settled = rowAge >= DEMO_ANIMATION.cardCheckingMs;
       const rowAccent = row.status ? STATUS_COLORS[row.status] : "#f5f7fb";
       const value = row.checkable && !settled ? "Checking..." : row.value;
+      const rowTop = rowLayout.y;
 
       context.globalAlpha = rowProgress;
       fillRoundRect(
         context,
         64,
-        y - 28,
+        rowTop,
         width - 128,
-        39,
+        rowLayout.height,
         15,
         hexToRgba(rowAccent, row.status ? 0.14 : 0.07)
       );
       context.font = "700 22px Inter, sans-serif";
       context.fillStyle = "#aeb8c7";
-      drawFittedText(context, row.label, 90, y - 1, 310);
+      drawCanvasTextLines(
+        context,
+        rowLayout.labelLines,
+        90,
+        rowTop + DEMO_CARD_LAYOUT.rowPaddingY + 22,
+        DEMO_CARD_LAYOUT.rowLineHeight
+      );
 
       context.font = "700 25px Inter, sans-serif";
       context.fillStyle = row.status && settled ? rowAccent : "#f5f7fb";
-      drawFittedText(context, value, 430, y - 1, width - 530);
+      drawCanvasTextLines(
+        context,
+        value === row.value
+          ? rowLayout.valueLines
+          : wrapCanvasText(context, value, width - 530),
+        430,
+        rowTop + DEMO_CARD_LAYOUT.rowPaddingY + 23,
+        DEMO_CARD_LAYOUT.rowLineHeight
+      );
       context.globalAlpha = 1;
     }
 
@@ -1240,6 +1794,8 @@ export class MapScene {
     }
 
     card.texture.dispose();
+    this.disposeDemoOverlay(card.overlay);
+    card.overlay = null;
     card.group.traverse((object) => this.disposeObjectResources(object));
     this.demoCardGroup.remove(card.group);
   }
@@ -1358,9 +1914,11 @@ export class MapScene {
     const elapsed = (now - this.startedAt) / 1000;
     this.cameraRig.update();
     const zoomStyle = this.updateMarkers(elapsed, now);
+    this.updateVolcanoMarkers(elapsed, now, zoomStyle);
     this.updateLinks(elapsed, zoomStyle);
     this.updateDemoCards(now);
     this.renderer.render(this.scene, this.camera);
+    this.cssRenderer.render(this.cssScene, this.camera);
     this.animationFrame = requestAnimationFrame(this.animate);
   };
 
@@ -1548,6 +2106,66 @@ export class MapScene {
     }
   }
 
+  private updateVolcanoMarkers(
+    elapsed: number,
+    now: number,
+    zoomStyle: MarkerZoomStyle
+  ): void {
+    const releaseProgress =
+      this.demoMarkerFocusReleasedAt === null
+        ? 0
+        : clamp01(
+            (now - this.demoMarkerFocusReleasedAt) / DEMO_ACTIVE_MARKER.releaseMs
+          );
+    const focusAgeMs = Math.max(0, now - this.demoMarkerFocusStartedAt);
+    const enterStrength = easeInOutSine(
+      clamp01(focusAgeMs / DEMO_ACTIVE_MARKER.enterMs)
+    );
+    const releaseStrength =
+      this.demoMarkerFocusReleasedAt === null
+        ? 1
+        : 1 - easeInOutSine(releaseProgress);
+    const activeStrength = enterStrength * releaseStrength;
+
+    for (const marker of this.volcanoMarkers) {
+      const wave = (Math.sin(elapsed * 2.2 + marker.phase) + 1) / 2;
+      const beamWave = (Math.sin(elapsed * 3.4 + marker.phase) + 1) / 2;
+      const active =
+        this.demoActive &&
+        this.demoFocusedVolcanoId === marker.volcano.id &&
+        activeStrength > 0;
+      const levelBoost = marker.volcano.level / 5;
+      const scale =
+        zoomStyle.groupScale *
+        (1 + wave * 0.1 + levelBoost * 0.12 + (active ? activeStrength * 0.45 : 0));
+      const beamScale =
+        1 +
+        levelBoost * 0.38 +
+        beamWave * 0.42 +
+        (active ? activeStrength * (1.8 + beamWave * 0.42) : 0);
+      const beamWidthScale =
+        1 + levelBoost * 0.18 + (active ? activeStrength * 0.3 : 0);
+
+      marker.group.scale.setScalar(scale);
+      marker.marker.material.opacity = active
+        ? 0.96
+        : 0.86 + wave * 0.1;
+      marker.marker.material.emissiveIntensity =
+        0.26 + marker.volcano.level * 0.08 + (active ? activeStrength * 0.34 : 0);
+      marker.beam.scale.set(beamWidthScale, beamScale, beamWidthScale);
+      marker.beam.material.opacity =
+        (0.14 +
+          beamWave * 0.2 +
+          marker.volcano.level * 0.045 +
+          (active ? activeStrength * 0.42 : 0)) *
+        zoomStyle.effectOpacityMultiplier;
+      marker.halo.scale.setScalar(1 + wave * 0.22 + (active ? activeStrength * 0.9 : 0));
+      marker.halo.material.opacity =
+        (0.18 + wave * 0.18 + marker.volcano.level * 0.05 + (active ? 0.38 : 0)) *
+        zoomStyle.effectOpacityMultiplier;
+    }
+  }
+
   private updateLinks(
     elapsed: number,
     zoomStyle = getMarkerZoomStyle({
@@ -1645,6 +2263,7 @@ export class MapScene {
     const height = this.container.clientHeight;
     this.cameraRig.updateAspect(width, height);
     this.renderer.setSize(width, height);
+    this.cssRenderer.setSize(width, height);
   };
 
   private onPointerMove = (event: PointerEvent): void => {
@@ -1654,15 +2273,15 @@ export class MapScene {
     }
 
     this.updatePointerMoved(event.clientX, event.clientY);
-    const site = this.getSiteAtPoint(event.clientX, event.clientY);
+    const target = this.getTargetAtPoint(event.clientX, event.clientY);
 
-    if (!site) {
+    if (!target) {
       this.clearHover();
       return;
     }
 
     this.renderer.domElement.style.cursor = "pointer";
-    this.onMarkerHover?.(site, { x: event.clientX, y: event.clientY });
+    this.onMarkerHover?.(target, { x: event.clientX, y: event.clientY });
   };
 
   private onPointerDown = (event: PointerEvent): void => {
@@ -1679,10 +2298,10 @@ export class MapScene {
       return;
     }
 
-    const site = this.getSiteAtPoint(event.clientX, event.clientY);
+    const target = this.getTargetAtPoint(event.clientX, event.clientY);
 
-    if (site) {
-      this.onMarkerClick?.(site);
+    if (target) {
+      this.onMarkerClick?.(target);
     }
   };
 
@@ -1704,7 +2323,10 @@ export class MapScene {
     this.pointerMovedAfterDown = distance > MARKER_CLICK_DRAG_TOLERANCE_PX;
   }
 
-  private getSiteAtPoint(clientX: number, clientY: number): SiteMarker | null {
+  private getTargetAtPoint(
+    clientX: number,
+    clientY: number
+  ): MapSceneHoverTarget | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.markerPickCandidates.length = 0;
 
@@ -1714,7 +2336,22 @@ export class MapScene {
         .project(this.camera);
 
       this.markerPickCandidates.push({
-        item: marker.site,
+        item: { type: "site", site: marker.site },
+        screenX: ((projected.x + 1) / 2) * rect.width,
+        screenY: ((-projected.y + 1) / 2) * rect.height,
+        ndcX: projected.x,
+        ndcY: projected.y,
+        ndcZ: projected.z
+      });
+    }
+
+    for (const marker of this.volcanoMarkers) {
+      const projected = this.markerProjection
+        .copy(marker.group.position)
+        .project(this.camera);
+
+      this.markerPickCandidates.push({
+        item: { type: "volcano", volcano: marker.volcano },
         screenX: ((projected.x + 1) / 2) * rect.width,
         screenY: ((-projected.y + 1) / 2) * rect.height,
         ndcX: projected.x,
@@ -1729,6 +2366,39 @@ export class MapScene {
       MARKER_PICK_RADIUS_PX
     );
   }
+}
+
+function getDemoTargetTitle(target: DemoRouteTarget): string {
+  return target.type === "site" ? target.site.locality : target.volcano.title;
+}
+
+function getDemoCardMeta(target: DemoRouteTarget): {
+  title: string;
+  pillLabel: string;
+  accent: string;
+  shouldFlash: boolean;
+} {
+  if (target.type === "site") {
+    return {
+      title: target.site.locality,
+      pillLabel: STATUS_LABELS[target.site.status],
+      accent: STATUS_COLORS[target.site.status],
+      shouldFlash: target.site.status !== "ok"
+    };
+  }
+
+  return {
+    title: target.volcano.title,
+    pillLabel: `VAL ${target.volcano.level}`,
+    accent: getVolcanoLevelColor(target.volcano.level),
+    shouldFlash: target.volcano.level > 0
+  };
+}
+
+function getDemoTargetCameraFeed(target: DemoRouteTarget) {
+  return target.type === "site"
+    ? target.site.cameraFeeds[0] ?? null
+    : target.volcano.cameraFeed;
 }
 
 function nextAnimationFrame(): Promise<void> {
@@ -1809,6 +2479,89 @@ function createRoundRectPath(
   context.lineTo(x, y + r);
   context.quadraticCurveTo(x, y, x + r, y);
   context.closePath();
+}
+
+function drawCanvasTextLines(
+  context: CanvasRenderingContext2D,
+  lines: string[],
+  x: number,
+  firstBaselineY: number,
+  lineHeight: number
+): void {
+  for (let index = 0; index < lines.length; index++) {
+    context.fillText(lines[index], x, firstBaselineY + index * lineHeight);
+  }
+}
+
+function wrapCanvasText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number
+): string[] {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let currentLine = "";
+
+  if (words.length === 0) {
+    return [""];
+  }
+
+  for (const word of words) {
+    const candidate = currentLine ? `${currentLine} ${word}` : word;
+
+    if (context.measureText(candidate).width <= maxWidth) {
+      currentLine = candidate;
+      continue;
+    }
+
+    if (currentLine) {
+      lines.push(currentLine);
+      currentLine = "";
+    }
+
+    if (context.measureText(word).width > maxWidth) {
+      const chunks = breakCanvasWord(context, word, maxWidth);
+
+      lines.push(...chunks.slice(0, -1));
+      currentLine = chunks.at(-1) ?? "";
+      continue;
+    }
+
+    currentLine = word;
+  }
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines.length > 0 ? lines : [text];
+}
+
+function breakCanvasWord(
+  context: CanvasRenderingContext2D,
+  word: string,
+  maxWidth: number
+): string[] {
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const character of word) {
+    const candidate = `${current}${character}`;
+
+    if (current && context.measureText(candidate).width > maxWidth) {
+      chunks.push(current);
+      current = character;
+      continue;
+    }
+
+    current = candidate;
+  }
+
+  if (current) {
+    chunks.push(current);
+  }
+
+  return chunks;
 }
 
 function drawFittedText(

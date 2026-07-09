@@ -28,6 +28,15 @@ export interface RimuFaultDevice {
 
 export type FaultsResponse = Record<string, RimuFaultDevice[]>;
 
+export interface VolcanoCameraFeed {
+  id: string;
+  title: string;
+  volcanoIds: string[];
+  latestImageMedium: string;
+  latestImageThumb: string;
+  latestImageLarge: string;
+}
+
 export interface RimuFeatureProperties {
   domain?: string;
   key?: string;
@@ -53,6 +62,7 @@ export interface SiteMarker {
   status: RimuStatus;
   fieldStatus: Record<string, RimuStatus>;
   devices: RimuFaultDevice[];
+  cameraFeeds: VolcanoCameraFeed[];
 }
 
 export interface LinkArc {
@@ -70,4 +80,19 @@ export interface MapData {
   sites: SiteMarker[];
   links: LinkArc[];
   loadedFromLiveApi: boolean;
+}
+
+export type VolcanicAlertLevel = 0 | 1 | 2 | 3 | 4 | 5;
+
+export interface VolcanoMarker {
+  id: string;
+  title: string;
+  lat: number;
+  lng: number;
+  level: VolcanicAlertLevel;
+  activity: string;
+  hazards: string;
+  aviationColor: string;
+  url: string;
+  cameraFeed: VolcanoCameraFeed | null;
 }

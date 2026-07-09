@@ -95,6 +95,36 @@ const faultsFixture = {
   ]
 };
 
+const volcanoFixture = {
+  type: "FeatureCollection",
+  features: [
+    {
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [175.896, -38.784] },
+      properties: {
+        acc: "Green",
+        activity: "No volcanic unrest.",
+        hazards: "Volcanic environment hazards.",
+        level: 0,
+        volcanoID: "taupo",
+        volcanoTitle: "Taupo"
+      }
+    },
+    {
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [175.563, -39.281] },
+      properties: {
+        acc: "Green",
+        activity: "Minor volcanic unrest.",
+        hazards: "Volcanic unrest hazards.",
+        level: 1,
+        volcanoID: "ruapehu",
+        volcanoTitle: "Ruapehu"
+      }
+    }
+  ]
+};
+
 test.beforeEach(async ({ page }) => {
   await mockRimuApi(page);
 });
@@ -118,8 +148,13 @@ test("loads the close extruded map view and renders markers", async ({
 
   const siteCount = await page.evaluate(() => window.__RIMU_SITE_COUNT__);
   expect(siteCount).toBe(3);
+  await expect.poll(() => page.evaluate(() => window.__RIMU_VOLCANO_COUNT__)).toBe(2);
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_VISIBLE_VOLCANO_COUNT__))
+    .toBe(2);
   await expect(page.locator("#legend .legend-button")).toHaveCount(6);
   await expect(page.getByTestId("tag-filter")).toBeVisible();
+  await expect(page.getByTestId("volcano-filter")).toBeVisible();
 
   const nonBlankCanvas = await page.locator("canvas").evaluate((element) => {
     const canvas = element as HTMLCanvasElement;
@@ -246,13 +281,14 @@ test("runs the TV demo loop across currently visible sites", async ({ page }) =>
     .toBe(true);
   await expect
     .poll(() => page.evaluate(() => window.__RIMU_DEMO_ROUTE_SIZE__))
-    .toBe(3);
+    .toBe(5);
   await expect
     .poll(() => page.evaluate(() => window.__RIMU_DEMO_CURRENT_SITE__))
     .not.toBeNull();
   await expect
     .poll(() => getSearchParam(page, "demoMode"))
     .toBe("true");
+  await expect(page.locator(".demo-camera-footer")).toHaveCount(0);
 
   await demoToggle.click();
 
@@ -266,6 +302,45 @@ test("runs the TV demo loop across currently visible sites", async ({ page }) =>
   await expect
     .poll(() => getSearchParam(page, "demoMode"))
     .toBeNull();
+});
+
+test("shows image-only camera card for volcano demo camera states", async ({ page }) => {
+  await page.goto("/?demoMode=true&filters=&volcanoLevels=1");
+  await page.waitForFunction(() => window.__RIMU_MAP_READY__ === true);
+
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_DEMO_ACTIVE__))
+    .toBe(true);
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_DEMO_ROUTE_SIZE__))
+    .toBe(1);
+
+  const footer = page.locator(".demo-camera-footer").first();
+
+  await expect(footer).toBeVisible({ timeout: 15000 });
+  await expect(footer).not.toContainText("Volcano Camera");
+  await expect(footer).not.toContainText("Ruapehu from North");
+  await expect(footer.locator(".demo-camera-pixels span")).toHaveCount(18);
+  await expect(footer.locator("img")).toHaveAttribute(
+    "src",
+    /m-ruapehunorth\.jpg/
+  );
+});
+
+test("does not show camera footer for volcanoes without public cameras", async ({
+  page
+}) => {
+  await page.goto("/?demoMode=true&filters=&volcanoLevels=0");
+  await page.waitForFunction(() => window.__RIMU_MAP_READY__ === true);
+
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_DEMO_ACTIVE__))
+    .toBe(true);
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_DEMO_ROUTE_SIZE__))
+    .toBe(1);
+
+  await expect(page.locator(".demo-camera-footer")).toHaveCount(0);
 });
 
 test("toggles fullscreen mode from the toolbar", async ({ page }) => {
@@ -350,7 +425,7 @@ test("loads toggle visibility and filters from query parameters", async ({
     .toBe(true);
   await expect
     .poll(() => page.evaluate(() => window.__RIMU_DEMO_ROUTE_SIZE__))
-    .toBe(2);
+    .toBe(4);
   await expect
     .poll(() => page.evaluate(() => window.__RIMU_AUTO_REFRESH_ACTIVE__))
     .toBe(true);
@@ -368,6 +443,33 @@ test("loads toggle visibility and filters from query parameters", async ({
   await expect(
     page.locator('#legend .legend-button[data-status="bad"]')
   ).toHaveAttribute("aria-pressed", "false");
+});
+
+test("filters volcano triangles and persists volcano controls", async ({ page }) => {
+  await page.goto("/");
+  await page.waitForFunction(() => window.__RIMU_MAP_READY__ === true);
+
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_VISIBLE_VOLCANO_COUNT__))
+    .toBe(2);
+
+  await page.locator('.volcano-level-button[data-volcano-level="0"]').click();
+
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_VISIBLE_VOLCANO_COUNT__))
+    .toBe(1);
+  await expect
+    .poll(() => getSearchParam(page, "volcanoLevels"))
+    .toBe("1,2,3,4,5");
+
+  await page.getByTestId("volcano-toggle").click();
+
+  await expect
+    .poll(() => page.evaluate(() => window.__RIMU_VISIBLE_VOLCANO_COUNT__))
+    .toBe(0);
+  await expect
+    .poll(() => getSearchParam(page, "volcanoes"))
+    .toBe("false");
 });
 
 test("toggles marker statuses from the top-left legend", async ({ page }) => {
@@ -514,6 +616,23 @@ async function mockRimuApi(page: Page): Promise<void> {
     route.fulfill({
       contentType: "application/json",
       body: JSON.stringify(faultsFixture)
+    })
+  );
+
+  await page.route(/\/volcano\/val$/, (route) =>
+    route.fulfill({
+      contentType: "application/vnd.geo+json",
+      body: JSON.stringify(volcanoFixture)
+    })
+  );
+
+  await page.route(/images\.geonet\.org\.nz\/volcano\/cameras\/latest\//, (route) =>
+    route.fulfill({
+      contentType: "image/png",
+      body: Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+        "base64"
+      )
     })
   );
 }

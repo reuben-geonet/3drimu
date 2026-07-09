@@ -290,6 +290,28 @@
       <section class="hud hud-status" aria-label="RIMU filters">
         <div class="filter-stack">
           <div id="legend" class="legend"></div>
+          <div
+            id="volcano-filter"
+            class="volcano-filter"
+            data-testid="volcano-filter"
+            aria-label="Volcano filters"
+          >
+            <button
+              id="volcano-toggle"
+              class="volcano-toggle"
+              type="button"
+              data-testid="volcano-toggle"
+              aria-pressed="true"
+            >
+              Volcanoes
+            </button>
+            <div
+              id="volcano-levels"
+              class="volcano-levels"
+              data-testid="volcano-levels"
+              aria-label="Volcanic alert level filters"
+            ></div>
+          </div>
           <div id="tag-filter" class="tag-filter" data-testid="tag-filter">
             <!-- <label class="tag-filter-label" for="tag-filter-input">Tag</label> -->
             <div class="tag-filter-control">

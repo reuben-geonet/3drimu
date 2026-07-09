@@ -63,9 +63,20 @@ button:focus-visible {
 }
 
 #scene-root canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
   display: block;
   width: 100%;
   height: 100%;
+}
+
+#scene-root .css3d-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
 }
 
 .hud {
@@ -83,6 +94,7 @@ button:focus-visible {
 }
 
 .hud-top {
+  z-index: 5;
   top: 1rem;
   right: 1rem;
   left: 1rem;
@@ -99,11 +111,13 @@ button:focus-visible {
 
 .filter-stack {
   --filter-inline-inset: 0.32rem;
+  --filter-row-gap: 0.42rem;
   display: flex;
+  width: 100%;
   flex-direction: column;
   align-items: flex-start;
-  gap: 0.42rem;
-  max-width: min(42rem, 100%);
+  gap: var(--filter-row-gap);
+  max-width: min(56rem, 100%);
 }
 
 .legend {
@@ -111,6 +125,73 @@ button:focus-visible {
   background: transparent;
   box-shadow: none;
   backdrop-filter: none;
+}
+
+.volcano-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.36rem;
+  margin-left: var(--filter-inline-inset);
+  max-width: calc(100% - var(--filter-inline-inset));
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.volcano-toggle,
+.volcano-level-button {
+  border: 1px solid color-mix(in srgb, var(--panel-border) 82%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  color: var(--muted);
+  box-shadow: 0 0.45rem 1.35rem rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  backdrop-filter: blur(18px);
+  transition:
+    border-color 240ms ease,
+    background-color 240ms ease,
+    color 240ms ease,
+    transform 240ms ease;
+}
+
+.volcano-toggle {
+  min-height: 2.22rem;
+  padding: 0 0.74rem;
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.volcano-toggle.is-active,
+.volcano-toggle:hover,
+.volcano-toggle:focus-visible {
+  border-color: color-mix(in srgb, #d1b5d3 68%, transparent);
+  background: color-mix(in srgb, #d1b5d3 18%, var(--panel));
+  color: var(--text);
+}
+
+.volcano-levels {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.volcano-level-button {
+  --volcano-level-color: #d1b5d3;
+  display: grid;
+  width: 2.22rem;
+  height: 2.22rem;
+  place-items: center;
+  padding: 0;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.volcano-level-button.is-active,
+.volcano-level-button:hover,
+.volcano-level-button:focus-visible {
+  border-color: color-mix(in srgb, var(--volcano-level-color) 76%, transparent);
+  background: color-mix(in srgb, var(--volcano-level-color) 36%, var(--panel));
+  color: var(--text);
+  transform: translateY(-1px);
 }
 
 p {
@@ -443,9 +524,11 @@ p {
   display: flex;
   flex-wrap: wrap;
   gap: 0.28rem;
-  max-width: min(42rem, 100%);
+  margin-left: var(--filter-inline-inset);
+  width: calc(100% - var(--filter-inline-inset));
+  max-width: min(56rem, calc(100% - var(--filter-inline-inset)));
   border-radius: 8px;
-  padding: var(--filter-inline-inset);
+  padding: 0;
 }
 
 .legend-button {
@@ -723,6 +806,197 @@ p {
   margin: 0;
 }
 
+.tooltip-camera {
+  margin-top: 0.72rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  border-radius: 8px;
+  padding: 0.5rem;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.tooltip-camera-heading,
+.tooltip-camera-caption {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 750;
+}
+
+.tooltip-camera-heading {
+  margin-bottom: 0.42rem;
+  color: var(--text);
+  text-transform: uppercase;
+}
+
+.tooltip-camera img {
+  display: block;
+  width: 100%;
+  max-height: 10rem;
+  object-fit: cover;
+  border-radius: 6px;
+}
+
+.tooltip-camera-caption {
+  margin-top: 0.38rem;
+  display: block;
+}
+
+.tooltip-camera-empty {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 750;
+}
+
+.demo-camera-footer {
+  --camera-accent: #d1b5d3;
+  position: relative;
+  width: min(14rem, calc(100vw - 2rem));
+  overflow: visible;
+  pointer-events: none;
+  transition: opacity 180ms ease;
+}
+
+.demo-camera-image {
+  position: relative;
+  display: grid;
+  aspect-ratio: 16 / 9;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.05), transparent 38%),
+    #050a12;
+  min-height: 0;
+  overflow: hidden;
+  place-items: center;
+}
+
+.demo-camera-pixels {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  opacity: 0.95;
+  overflow: visible;
+  transition: opacity 420ms ease;
+}
+
+.demo-camera-footer.is-ready .demo-camera-pixels,
+.demo-camera-footer.is-error .demo-camera-pixels {
+  opacity: 0;
+}
+
+.demo-camera-pixels span {
+  position: absolute;
+  top: var(--pixel-y);
+  left: -12%;
+  width: var(--pixel-size);
+  height: var(--pixel-size);
+  border-radius: 2px;
+  background: var(--camera-accent);
+  box-shadow: 0 0 0.62rem color-mix(in srgb, var(--camera-accent) 80%, transparent);
+  opacity: 0;
+  animation: camera-pixel-flow 1.18s linear infinite;
+  animation-delay: var(--pixel-delay);
+}
+
+.demo-camera-image img {
+  display: block;
+  grid-area: 1 / 1;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  filter: saturate(0.74) contrast(1.15);
+  transition:
+    opacity 180ms ease,
+    filter 420ms ease;
+}
+
+.demo-camera-footer.is-revealing .demo-camera-image img,
+.demo-camera-footer.is-ready .demo-camera-image img {
+  opacity: 1;
+}
+
+.demo-camera-footer.is-ready .demo-camera-image img {
+  filter: none;
+}
+
+.demo-camera-reveal {
+  position: absolute;
+  z-index: 2;
+  inset: -1px;
+  display: grid;
+  grid-template-columns: repeat(var(--camera-reveal-cols), 1fr);
+  grid-template-rows: repeat(var(--camera-reveal-rows), 1fr);
+  pointer-events: none;
+}
+
+.demo-camera-reveal span {
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.07), transparent 48%),
+    #050a12;
+  box-shadow:
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.03),
+    0 0 0.18rem rgba(0, 0, 0, 0.32);
+  opacity: 1;
+  transform: scale(1.03);
+}
+
+.demo-camera-footer.is-revealing .demo-camera-reveal span {
+  animation: camera-tile-reveal 560ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  animation-delay: var(--tile-delay);
+}
+
+.demo-camera-footer.is-ready .demo-camera-reveal,
+.demo-camera-footer.is-error .demo-camera-reveal {
+  display: none;
+}
+
+.demo-camera-footer.is-error .demo-camera-image {
+  min-height: 4.2rem;
+  color: #f5f7fb;
+  font-weight: 750;
+}
+
+.demo-camera-footer.is-error .demo-camera-image::after {
+  content: "Camera image unavailable";
+}
+
+@keyframes camera-pixel-flow {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, -0.35rem, 0) scale(0.6);
+  }
+
+  18% {
+    opacity: 0.95;
+  }
+
+  76% {
+    opacity: 0.85;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate3d(17rem, 0.35rem, 0) scale(1.55);
+  }
+}
+
+@keyframes camera-tile-reveal {
+  0% {
+    opacity: 1;
+    transform: scale(1.03);
+  }
+
+  58% {
+    opacity: 0.96;
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(0.72);
+  }
+}
+
 .loading-overlay {
   position: fixed;
   z-index: 10;
@@ -942,7 +1216,7 @@ p {
   }
 
   .hud-status {
-    right: 4.45rem;
+    right: 1rem;
     align-items: flex-start;
   }
 
@@ -952,7 +1226,6 @@ p {
   }
 
   .legend {
-    width: 100%;
     max-width: none;
   }
 

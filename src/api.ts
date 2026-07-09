@@ -8,6 +8,7 @@ import type {
   RimuPointFeature,
   SiteMarker
 } from "./types";
+import { getCameraFeedsForLocality } from "./volcanoCameras";
 
 const RIMU_BASE_URL = "https://rimu.geonet.org.nz";
 const LOCALITIES_URL = `${RIMU_BASE_URL}/dapper/meta/fdmp/entries?aggregate=locality`;
@@ -137,7 +138,8 @@ export function buildMapData(
         tags: pointFeature.properties.tags ?? [],
         status,
         fieldStatus,
-        devices
+        devices,
+        cameraFeeds: getCameraFeedsForLocality(locality)
       });
     }
 

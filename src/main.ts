@@ -1,6 +1,11 @@
 import "./styles.css";
 import { getRimuChartUrl, loadRimuMapData } from "./api";
-import { MapScene, renderLegend, type DemoModeState } from "./scene";
+import {
+  MapScene,
+  renderLegend,
+  type DemoModeState,
+  type MapSceneHoverTarget
+} from "./scene";
 import { RIMU_STATUSES, STATUS_LABELS } from "./status";
 import {
   buildSiteTagOptions,
@@ -9,8 +14,14 @@ import {
   type SiteTagOption
 } from "./tagFilters";
 import { ThemeController } from "./theme";
-import type { RimuStatus, SiteMarker } from "./types";
+import type { RimuStatus, SiteMarker, VolcanicAlertLevel, VolcanoMarker } from "./types";
 import { startAppUpdateRefresh } from "./updateRefresh";
+import { getLatestCameraImageUrl } from "./volcanoCameras";
+import {
+  getVolcanoLevelColor,
+  loadVolcanoMarkers,
+  VOLCANIC_ALERT_LEVELS
+} from "./volcanoes";
 import { WakeLockController } from "./wakeLock";
 
 const MIN_LOADING_MS = 2400;
@@ -26,6 +37,8 @@ interface InitialBrowserConfig {
   radioLink?: boolean;
   filters?: Set<RimuStatus>;
   tag?: string;
+  volcanoes?: boolean;
+  volcanoLevels?: Set<VolcanicAlertLevel>;
 }
 
 declare global {
@@ -35,6 +48,10 @@ declare global {
     __RIMU_VISIBLE_SITE_COUNT__?: number;
     __RIMU_LINK_COUNT__?: number;
     __RIMU_LINKS_VISIBLE__?: boolean;
+    __RIMU_VOLCANO_COUNT__?: number;
+    __RIMU_VISIBLE_VOLCANO_COUNT__?: number;
+    __RIMU_VOLCANOES_VISIBLE__?: boolean;
+    __RIMU_VISIBLE_VOLCANO_LEVELS__?: number[];
     __RIMU_AUTO_REFRESH_ACTIVE__?: boolean;
     __RIMU_AUTO_REFRESH_REMAINING_SECONDS__?: number;
     __RIMU_DEMO_ACTIVE__?: boolean;
@@ -54,6 +71,9 @@ const sceneRoot = requiredElement("scene-root");
 const loadingOverlay = requiredElement("loading-overlay");
 const loadingCopy = requiredElement("loading-copy");
 const legend = requiredElement("legend");
+const volcanoFilter = requiredElement("volcano-filter");
+const volcanoToggle = requiredElement<HTMLButtonElement>("volcano-toggle");
+const volcanoLevels = requiredElement("volcano-levels");
 const tagFilter = requiredElement("tag-filter");
 const tagFilterInput = requiredElement<HTMLInputElement>("tag-filter-input");
 const tagFilterList = requiredElement("tag-filter-list");
@@ -72,14 +92,18 @@ const theme = new ThemeController(themeToggle);
 const wakeLockController = new WakeLockController();
 const map = new MapScene(sceneRoot, {
   onMarkerHover: renderTooltip,
-  onMarkerClick: openRimuChart,
+  onMarkerClick: openMapTarget,
   onDemoStateChange: (state) => {
     syncDemoToggle(state);
     wakeLockController.setActive(state.active);
   }
 });
 const visibleStatuses = new Set<RimuStatus>(RIMU_STATUSES);
+const visibleVolcanoLevels = new Set<VolcanicAlertLevel>(
+  initialBrowserConfig.volcanoLevels ?? VOLCANIC_ALERT_LEVELS
+);
 let selectedTag: string | null = initialBrowserConfig.tag ?? null;
+let volcanoesVisible = initialBrowserConfig.volcanoes ?? true;
 let tagOptions: SiteTagOption[] = [];
 let loadedSiteCount = 0;
 let loadedSites: readonly SiteMarker[] = [];
@@ -93,14 +117,18 @@ let refreshInFlight: Promise<void> | undefined;
 theme.onChange((nextTheme) => map.setTheme(nextTheme));
 map.setTheme(theme.theme);
 applyInitialFilterConfig(initialBrowserConfig);
+map.setVolcanoesVisible(volcanoesVisible);
+map.setVisibleVolcanoLevels(visibleVolcanoLevels);
 map.setVisibleTag(selectedTag);
 renderLegend(legend, visibleStatuses);
+renderVolcanoFilter();
 renderTagFilter();
 syncLinkToggle();
 syncAutoRefreshToggle();
 syncDemoToggle();
 syncFullscreenToggle();
 legend.addEventListener("click", onLegendClick);
+volcanoFilter.addEventListener("click", onVolcanoFilterClick);
 tagFilterInput.addEventListener("focus", openTagFilterList);
 tagFilterInput.addEventListener("input", onTagFilterInput);
 tagFilterInput.addEventListener("keydown", onTagFilterKeyDown);
@@ -128,14 +156,19 @@ void boot();
 async function boot(): Promise<void> {
   window.__RIMU_MAP_READY__ = false;
   const startedAt = performance.now();
-  const data = await loadRimuMapData();
+  const [data, volcanoes] = await Promise.all([
+    loadRimuMapData(),
+    loadVolcanoMarkers()
+  ]);
   const remaining = Math.max(0, MIN_LOADING_MS - (performance.now() - startedAt));
 
   await delay(remaining);
   updateTagOptions(data.sites);
   map.setData(data.sites, data.links);
+  map.setVolcanoes(volcanoes);
   applyInitialLinkConfig(initialBrowserConfig);
   syncVisibleSiteCount();
+  syncVisibleVolcanoCount();
   syncLinkToggle();
   loadingOverlay.classList.add("is-hidden");
   await map.startIntro();
@@ -144,6 +177,7 @@ async function boot(): Promise<void> {
   syncBrowserUrlConfig();
   window.__RIMU_MAP_READY__ = true;
   window.__RIMU_SITE_COUNT__ = data.sites.length;
+  window.__RIMU_VOLCANO_COUNT__ = volcanoes.length;
   window.__RIMU_LAST_LOAD_SOURCE__ = data.loadedFromLiveApi ? "live" : "fallback";
   startAppUpdateRefresh({
     onVersion: (version) => {
@@ -176,13 +210,19 @@ async function refreshOnce(): Promise<void> {
   const startedAt = performance.now();
 
   try {
-    const data = await loadRimuMapData();
+    const [data, volcanoes] = await Promise.all([
+      loadRimuMapData(),
+      loadVolcanoMarkers()
+    ]);
     updateTagOptions(data.sites);
     map.setData(data.sites, data.links);
+    map.setVolcanoes(volcanoes);
     syncVisibleSiteCount();
+    syncVisibleVolcanoCount();
     syncLinkToggle();
     syncBrowserUrlConfig();
     window.__RIMU_SITE_COUNT__ = data.sites.length;
+    window.__RIMU_VOLCANO_COUNT__ = volcanoes.length;
     window.__RIMU_LAST_LOAD_SOURCE__ = data.loadedFromLiveApi ? "live" : "fallback";
   } finally {
     const remainingSpinMs = Math.max(0, REFRESH_SPIN_MS - (performance.now() - startedAt));
@@ -192,19 +232,41 @@ async function refreshOnce(): Promise<void> {
   }
 }
 
-function renderTooltip(site: SiteMarker | null, point?: { x: number; y: number }): void {
-  if (!site || !point) {
+function renderTooltip(
+  target: MapSceneHoverTarget | null,
+  point?: { x: number; y: number }
+): void {
+  if (!target || !point) {
     tooltip.classList.remove("is-visible");
     return;
   }
 
+  tooltip.innerHTML =
+    target.type === "site"
+      ? getSiteTooltipHtml(target.site)
+      : getVolcanoTooltipHtml(target.volcano);
+  tooltip.style.left = `${Math.min(point.x + 16, window.innerWidth - 360)}px`;
+  tooltip.style.top = `${Math.min(point.y + 16, window.innerHeight - 260)}px`;
+  tooltip.classList.add("is-visible");
+}
+
+function getSiteTooltipHtml(site: SiteMarker): string {
   const fieldSummary = Object.entries(site.fieldStatus)
     .slice(0, 4)
     .map(([field, status]) => `${field}: ${STATUS_LABELS[status]}`)
     .join(", ");
   const tags = site.tags.slice(0, 8).join(", ");
+  const primaryCamera = site.cameraFeeds[0] ?? null;
+  const cameraHtml = primaryCamera
+    ? getCameraTooltipHtml(
+        "Camera Detected",
+        primaryCamera.title,
+        getLatestCameraImageUrl(primaryCamera),
+        site.cameraFeeds.length > 1 ? `+${site.cameraFeeds.length - 1} camera` : null
+      )
+    : "";
 
-  tooltip.innerHTML = `
+  return `
     <h2>${escapeHtml(site.locality)}</h2>
     <dl>
       <dt>Status</dt><dd>${STATUS_LABELS[site.status]}</dd>
@@ -213,14 +275,63 @@ function renderTooltip(site: SiteMarker | null, point?: { x: number; y: number }
       <dt>Fields</dt><dd>${escapeHtml(fieldSummary || "No current fault fields")}</dd>
       <dt>Tags</dt><dd>${escapeHtml(tags || "N/A")}</dd>
     </dl>
+    ${cameraHtml}
   `;
-  tooltip.style.left = `${Math.min(point.x + 16, window.innerWidth - 360)}px`;
-  tooltip.style.top = `${Math.min(point.y + 16, window.innerHeight - 220)}px`;
-  tooltip.classList.add("is-visible");
 }
 
-function openRimuChart(site: SiteMarker): void {
-  window.open(getRimuChartUrl(site.locality), "_blank", "noopener,noreferrer");
+function getVolcanoTooltipHtml(volcano: VolcanoMarker): string {
+  const cameraHtml = volcano.cameraFeed
+    ? getCameraTooltipHtml(
+        "Volcano Camera",
+        volcano.cameraFeed.title,
+        getLatestCameraImageUrl(volcano.cameraFeed),
+        null
+      )
+    : `<div class="tooltip-camera tooltip-camera-empty">No camera available</div>`;
+
+  return `
+    <h2>${escapeHtml(volcano.title)}</h2>
+    <dl>
+      <dt>Alert Level</dt><dd>${volcano.level}</dd>
+      <dt>Activity</dt><dd>${escapeHtml(volcano.activity)}</dd>
+      <dt>Hazards</dt><dd>${escapeHtml(volcano.hazards)}</dd>
+      <dt>Aviation</dt><dd>${escapeHtml(volcano.aviationColor)}</dd>
+    </dl>
+    ${cameraHtml}
+  `;
+}
+
+function getCameraTooltipHtml(
+  label: string,
+  title: string,
+  imageUrl: string,
+  countLabel: string | null
+): string {
+  return `
+    <div class="tooltip-camera">
+      <div class="tooltip-camera-heading">
+        <span>${escapeHtml(label)}</span>
+        ${countLabel ? `<span>${escapeHtml(countLabel)}</span>` : ""}
+      </div>
+      <img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(title)}" loading="lazy" />
+      <div class="tooltip-camera-caption">
+        ${escapeHtml(title)} · GeoNet / Earth Sciences NZ
+      </div>
+    </div>
+  `;
+}
+
+function openMapTarget(target: MapSceneHoverTarget): void {
+  if (target.type === "site") {
+    window.open(
+      getRimuChartUrl(target.site.locality),
+      "_blank",
+      "noopener,noreferrer"
+    );
+    return;
+  }
+
+  window.open(target.volcano.url, "_blank", "noopener,noreferrer");
 }
 
 function onLegendClick(event: MouseEvent): void {
@@ -240,6 +351,48 @@ function onLegendClick(event: MouseEvent): void {
   renderLegend(legend, visibleStatuses);
   updateTagOptions(loadedSites);
   syncVisibleSiteCount();
+  syncBrowserUrlConfig();
+}
+
+function onVolcanoFilterClick(event: MouseEvent): void {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+
+  const toggle = event.target.closest<HTMLButtonElement>("#volcano-toggle");
+
+  if (toggle && volcanoFilter.contains(toggle)) {
+    volcanoesVisible = !volcanoesVisible;
+    map.setVolcanoesVisible(volcanoesVisible);
+    renderVolcanoFilter();
+    syncVisibleVolcanoCount();
+    syncBrowserUrlConfig();
+    return;
+  }
+
+  const levelButton = event.target.closest<HTMLButtonElement>(
+    ".volcano-level-button[data-volcano-level]"
+  );
+
+  if (!levelButton || !volcanoLevels.contains(levelButton)) {
+    return;
+  }
+
+  const level = parseVolcanicAlertLevel(levelButton.dataset.volcanoLevel);
+
+  if (level === null) {
+    return;
+  }
+
+  if (visibleVolcanoLevels.has(level)) {
+    visibleVolcanoLevels.delete(level);
+  } else {
+    visibleVolcanoLevels.add(level);
+  }
+
+  map.setVisibleVolcanoLevels(visibleVolcanoLevels);
+  renderVolcanoFilter();
+  syncVisibleVolcanoCount();
   syncBrowserUrlConfig();
 }
 
@@ -540,6 +693,14 @@ function syncVisibleSiteCount(): void {
   window.__RIMU_VISIBLE_SITE_COUNT__ = map.getVisibleSiteCount();
 }
 
+function syncVisibleVolcanoCount(): void {
+  window.__RIMU_VISIBLE_VOLCANO_COUNT__ = map.getVisibleVolcanoCount();
+  window.__RIMU_VOLCANOES_VISIBLE__ = volcanoesVisible;
+  window.__RIMU_VISIBLE_VOLCANO_LEVELS__ = VOLCANIC_ALERT_LEVELS.filter((level) =>
+    visibleVolcanoLevels.has(level)
+  );
+}
+
 function syncLinkToggle(): void {
   const visible = map.getLinksVisible();
 
@@ -596,6 +757,34 @@ function syncFullscreenToggle(): void {
   }
 
   window.__RIMU_FULLSCREEN_ACTIVE__ = active;
+}
+
+function renderVolcanoFilter(): void {
+  volcanoToggle.classList.toggle("is-active", volcanoesVisible);
+  volcanoToggle.setAttribute("aria-pressed", String(volcanoesVisible));
+  volcanoToggle.setAttribute(
+    "aria-label",
+    `${volcanoesVisible ? "Hide" : "Show"} volcanoes`
+  );
+
+  volcanoLevels.replaceChildren(
+    ...VOLCANIC_ALERT_LEVELS.map((level) => {
+      const button = document.createElement("button");
+
+      button.type = "button";
+      button.className = "volcano-level-button";
+      button.dataset.volcanoLevel = String(level);
+      button.style.setProperty("--volcano-level-color", getVolcanoLevelColor(level));
+      button.classList.toggle("is-active", visibleVolcanoLevels.has(level));
+      button.setAttribute("aria-pressed", String(visibleVolcanoLevels.has(level)));
+      button.setAttribute("aria-label", `Toggle volcanic alert level ${level}`);
+      button.textContent = String(level);
+
+      return button;
+    })
+  );
+
+  syncVisibleVolcanoCount();
 }
 
 function setAutoRefreshActive(active: boolean): void {
@@ -753,7 +942,9 @@ function getInitialBrowserConfig(): InitialBrowserConfig {
     demoMode: parseBooleanQueryParam(params.get("demoMode")),
     radioLink: parseBooleanQueryParam(params.get("radioLink")),
     filters: parseStatusFilterQueryParam(params.get("filters")),
-    tag: parseTagQueryParam(params.get("tag"))
+    tag: parseTagQueryParam(params.get("tag")),
+    volcanoes: parseBooleanQueryParam(params.get("volcanoes")),
+    volcanoLevels: parseVolcanoLevelsQueryParam(params.get("volcanoLevels"))
   };
 }
 
@@ -793,6 +984,34 @@ function parseStatusFilterQueryParam(value: string | null): Set<RimuStatus> | un
   return statuses;
 }
 
+function parseVolcanoLevelsQueryParam(
+  value: string | null
+): Set<VolcanicAlertLevel> | undefined {
+  if (value === null) {
+    return undefined;
+  }
+
+  const levels = new Set<VolcanicAlertLevel>();
+
+  for (const rawLevel of value.split(",")) {
+    const level = parseVolcanicAlertLevel(rawLevel);
+
+    if (level !== null) {
+      levels.add(level);
+    }
+  }
+
+  return levels;
+}
+
+function parseVolcanicAlertLevel(value: string | undefined): VolcanicAlertLevel | null {
+  const level = Number(value);
+
+  return VOLCANIC_ALERT_LEVELS.includes(level as VolcanicAlertLevel)
+    ? (level as VolcanicAlertLevel)
+    : null;
+}
+
 function parseTagQueryParam(value: string | null): string | undefined {
   if (value === null) {
     return undefined;
@@ -809,7 +1028,9 @@ function syncBrowserUrlConfig(): void {
   syncBooleanUrlParam(params, "autoRefresh", autoRefreshActive, false);
   syncBooleanUrlParam(params, "demoMode", map.getDemoModeState().active, false);
   syncBooleanUrlParam(params, "radioLink", map.getLinksVisible(), true);
+  syncBooleanUrlParam(params, "volcanoes", volcanoesVisible, true);
   syncFilterUrlParam(params);
+  syncVolcanoLevelsUrlParam(params);
   syncTagUrlParam(params);
 
   const query = params.toString();
@@ -848,6 +1069,19 @@ function syncFilterUrlParam(params: URLSearchParams): void {
   }
 
   params.set("filters", visibleFilters.join(","));
+}
+
+function syncVolcanoLevelsUrlParam(params: URLSearchParams): void {
+  const visibleLevels = VOLCANIC_ALERT_LEVELS.filter((level) =>
+    visibleVolcanoLevels.has(level)
+  );
+
+  if (visibleLevels.length === VOLCANIC_ALERT_LEVELS.length) {
+    params.delete("volcanoLevels");
+    return;
+  }
+
+  params.set("volcanoLevels", visibleLevels.join(","));
 }
 
 function syncTagUrlParam(params: URLSearchParams): void {
